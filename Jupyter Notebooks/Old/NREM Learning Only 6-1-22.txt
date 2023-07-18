@@ -1,0 +1,3302 @@
+Code taken from "STDP Fixed!" on 6-1-22
+
+
+## Goals
+
+ - Change simulation so that only NREM learning is played. Also turn off plasticity. I need to adjust my parameters so that NREM activates simultaneously the green and blue LE neurons. This is the necessary beginning for my simulations, because I need the blue and green LE neurons to be strengthened to their backbones as a result of NREM, but not in an orthogonal way. Michal suggested turning off activity of the pink and purple LE neurons when doing these tests. 
+
+
+
+ - In order to activate both green and blue LE during NREM, I have the following options: 1. increasing BBtoLE_mult, 2. increasing LEtoLE_mult, 3. decreasing SSTtoLE_mult, 4. decreasing LEtoSST. 
+
+## Changes
+
+
+ - Adjusted param so that NREM starts at t=0 and lasts until end of simulation.
+ 
+ - Turned off plasticity for entire simulation.
+
+
+
+## Notes
+
+
+
+----------------------------------------------------------
+
+
+import numpy as np
+import scipy
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+import random as RD
+from matplotlib import colors
+import winsound
+import csv
+import copy
+from tqdm import tqdm
+import seaborn as sns
+
+
+-------------------------------------------------------------
+
+
+
+
+class parameters:
+    
+    def __init__(self):
+        self.numEquations = 4
+        self.stepSize = 0.1
+        self.simLength = 2000
+        self.tarray = np.arange(0,self.simLength,self.stepSize)
+        self.Ntimes = len(self.tarray)
+        self.spikeThreshold = 5 # Sets the voltage(mV) at which a spike is recorded. 
+        self.numnrn = 180 # Number of neurons in the model.
+        self.numSST = 20 # Number of SST neurons to be forced into the model.
+        self.c_e = 0.1 # Percent connectivity for excitatory neurons.
+        self.c_i = 0.5 # Percent connectivity for inhibitory neurons.
+        self.p_e = 0.8 # Probabilty of an existing connection breaking and forming a new connection, excitatory.
+        self.p_i = 0 # Probabilty of an existing connection breaking and forming a new connection, inhibitory.
+        self.local_conn = True # When true, new connections can be formed with local connections. When false, only non-local new
+                        # connections are formed.
+            
+        self.gks_E = 1 # ACh level of excitatory neurons. Type I is gks=0, Type II gks=1.5.
+        self.gks_SST = 1 # ACh level for SST neurons. 
+        self.Idrive_min = 0.5 # Lower range for possible random Idrives. For excitory neurons.
+        self.Idrive_max = 0.5 # Upper range for possible random Idrives. For excitory neurons.
+        self.Idrive_SST = -0.1 #The Idrive for SST neurons. Should be low enough so that they do not fire without synaptic input. 
+        self.Idrive_LE = -6 # Idrive to be assigned to LE neurons (or a subset of them).
+        self.gsynH = 3 # High gsyn value for LE neurons.
+        self.gsynL = 0.5 # Low gsyn value for backbone neurons.
+        self.w_max = 3 #Maximum positive synaptic plasticity multiplier allowed in network.
+        
+        self.NABP_boo = True # When true, non-active backbone has plasticity. When False, it does not. 
+        self.makeSound = True # Determines whether to play the three tones after simulation is finished.
+        self.plas_skip_time = 0 # Time before plasticity begins.
+        self.NREMtest_boo = False # Currently not used anywhere. Needs code needs to be added to make the NREM testing phase optional.
+        self.RD_seed = True # When true, a seed is used to generate connections
+        self.sim_seed = 1 # The seed for generating all random elements of the simulation. NOTE: defining a seed before a
+                        # sequence of random events will not only define the outcome of the first random choice/event, but
+                        # also the following ones. So we only need one seed.
+        self.bbs_toplot = [1,2] # list of backbones to plot by ID.
+        self.directory = r'C:\Users\satchelm\OneDrive - Umich\Zochowski Lab\Overwrite' # The directory for all files to be saved to.
+        
+        self.osc_period = 300 # The amount of time each BB is active in the oscillations. Note that param.osc_period under 1000*param.plas_thr will
+                        # likely cause large depotentiation problems. Also, we need param.osc_period < 1000/param.dep_thr to 
+                        # prevent large depotentiation.
+        self.num_test_phases = 0 # Number of test phases in simulation. Right now we have 3: pre-learning test, 
+                        # post-NREM test, and post-learning test.
+        self.BB_len_test = 0 # Length of test phase for each BB (in ms). Total pre- and post- test phase length is then 2*param.BB_len_test.
+        self.BB_len_NREM = int((self.simLength - 2*self.num_test_phases*self.BB_len_test)/4) # The length of NREM for each BB (in ms).
+        self.BB_len_REM = int((self.simLength - 2*self.num_test_phases*self.BB_len_test)/4) # The length of REM for each BB (in ms).
+        self.t_start_NREM = 2*self.BB_len_test # Time at which NREM begins.
+        self.t_start_NREMtest = self.t_start_NREM + 2*self.BB_len_NREM # Time at which the test phase after NREM begins.
+        self.t_start_REM = self.t_start_NREMtest + 2*self.BB_len_test # Time at which REM begins.
+        self.t_start_posttest = self.t_start_REM + 2*self.BB_len_REM # Time at which the post-learning test phase begins.
+        self.storage_freq = 10 # How often (in ms) to store connection weight data for each neuron. A value of 10 collects data every 
+                        # 10 ms. At 1 ms, I was having memory issues on Michal's PC because the arrays were getting too large.
+        self.dep_counts = [0,0] # Lists to hold counts for total number of times plasticity rule is activated
+        self.bi_counts = [0,0] # inside each frequency range. [during NREM, during REM]
+        self.pot_counts = [0,0]
+        
+        self.w_EE = 0.15 # AMPA connection strength excitatory to excitatory.
+        self.w_EI = 0.08 # AMPA connection strength excitatory to inhibitory.
+        self.w_II = 0.15 # GABA A connection strength inhibitory to inhibitory.
+        self.w_IE = 0 # GABA A connection strength inhibitory to excitatory.
+        self.w_II_B = 0 # GABA B connection strength inhibitory to inhibitory.
+        self.w_IE_B = 0.05 # GABA B connection strength inhibitory to excitatory.
+        
+        self.LE_mult = 0.8 # Multiplier for synapses where LE neuron is presynaptic neuron.
+        self.LEtoLE_mult = 0.8 # Multiplier for LE-LE.
+        self.BBtoLE_mult = 1.4 # Multiplier for connections from BB to LE cells.
+        self.SSTtoLE_mult = 1.3 # Multiplier for connections from SST to LE cells.
+        
+        self.A_dep = 0.25 # The maximum amount a synapse can depotentiate per spike.
+        self.A_pot = 0.5 # The maximum amount a synapse can potentiate per spike.
+        self.tau_dep = 34 # Time constant for depotentiation side of STDP rule.
+        self.tau_pot = 14 # Time constant for potentiation side of STDP rule.
+        self.const_ISI = 70 # The inter-spike interval (in ms) at which to freeze the magnitude of the depotentiation portion
+        # of the STDP rule so that it stays constant for larger ISIs.
+
+        self.bg_str = 0 # The amount to strengthen connections from BB to blue and green LE neurons.
+        self.pu_weak = 0 # The amount to weaken connections from both BBs to purple LE neurons.
+        self.pi_weak = 0 # The amount to weaken connections from both BBs to pink LE neurons.
+        
+
+        
+            
+
+def init_param(): # Function to simply initialize a parameter object. Desired changes to parameters should be made here,
+    # as opposed to being made in the parameter class function (except changes that affect definitions within the parameter
+    # class definition).
+
+    param = parameters()
+    
+    # The directory must be updated to have forward slashes, including a forward slash on the end.
+    param.directory = param.directory.replace('\\','/') # Replaces backslash "\" with forward slash "/".
+    param.directory = param.directory + '/' # Adds forward slash to end of string.
+    
+    param.t_start_NREM = 0
+    param.t_start_NREMtest = param.simLength
+    param.t_start_REM = param.simLength+1000
+    param.t_start_posttest = param.simLength+2000
+    
+    
+    return param
+
+
+        
+
+class neuron:
+        
+    def __init__(self):
+        self.ID = 0
+        self.position = []
+        self.connections = [] #List of (1 or 0) connection strengths to other neurons. Is tuple like [[postsyn,conn],[postsyn,conn]...].
+        # DO NOT CHANGE self.connections from values of only 1 and 0 because many apects of the program rely on it.
+        self.connectionWeights = [] #Holds changes made from plasticity. For self as presynaptic nrn. Values are strengths of
+        # signal to other neurons from this neuron.
+        self.Input_syn = 0
+        self.Input_noise = 0
+        self.Input_external = 0
+        self.spikeTimes = [] # Set to record a spike when membrane voltage breaches variable param.spikeThreshold.
+        self.prevActivity = 0
+        self.neuronsInRange = [] #Tracks the # of neurons in range so as to minimize looping time during connection growth function
+        self.solutions = np.zeros(param.numEquations) #Why does nrn.solutions still function as a comment?
+        
+        #Things I have added in myself:
+        self.spike = False #Determines whether the neuron has already spiked or not. 
+        self.Idrive = 0
+        self.color = '' #Color of neuron for graphing.
+        self.conn_in = [] #Connections coming in from other neurons. Sum is the in-degree of the neuron. Note, not tuple like self.connections.
+        # Format is 1D list of connection strengths, where list index is presynaptic neuron. 
+        self.category = 'Excitatory' #Labels the neuron type. Default is excitatory, can be chanegd to inhibitory. 
+        self.gsyn = 1 # Connection strength multiplier for I->E connections.
+        self.pair_spiketimes = np.zeros(param.numnrn) #Pair spike times for outgoing connections. Note that this only holds the most recent pair spiketime for each conn.
+        self.start_noise = 0 #Starting step time for noise when it occurs (mV/param.stepSize). 
+        self.backbone_ID = 0 # backbone_ID=0 will be used to designate lower E neurons and -1 for inhibitory neurons.
+        self.spike_gaussian = [] #List of gaussian curves, each centered at the time a neuron spikes. Each index in list corresponds to a t_ind time.
+        self.plas_on = True #Boolean determining whether or not to change plasticity of connections TO and FROM this nrn. 
+        self.cw_in_history = [] #Connection weight history. Holds plasticity connection weights coming IN (this nrn as postsyn).
+        # Set up as [[[weight from nrn 0, weight from nrn 1, ... ],time(ms)] ,...], one weight list for each milisecond.
+        # List set up to skip first plas_skip_time ms because we don't want plasticity due to transient behaviors. Note the default
+        # value for connections and non-existent connections is 1. 
+        self.cw_out_history = [] # Same as cw_in_history, just with this nrn as the presynaptic neuron.
+        self.scatter_color = 'grey'
+        self.quad_color = 'grey' # Color assigned to LE neurons based on initial connectivity to BBs.
+
+        
+        
+def equations(solns_, eqn, Isyn, Idrive,nrn):
+    # These equations are parameters are adjusted to fit fast-spiking interneurons.
+    
+    
+    tempVal = 0
+    
+    category = nrn.category
+    Inoise = nrn.Input_noise #Noise from neuron. Maybe I should put Idrive, solns, etc here as well?
+    
+    if category == 'Excitatory':
+        gks = param.gks_E
+        C = 1 
+        gna = 24
+        gkdr = 3
+        gl = 0.02
+        Vna = 55
+        Vk = -90
+        Vl = -60
+        if(eqn == 0):
+            hinf = 1/(1+np.exp((solns_[3]+53)/7))
+            tauh = .37 + 2.78/(1+np.exp((solns_[3]+40.5)/6))
+            tempVal = (hinf - solns_[0])/tauh 
+        elif(eqn == 1):
+            ninf = 1/(1+np.exp((-solns_[3]-30)/10))
+            taun = .37 + 1.85/(1+np.exp((solns_[3]+27)/15))
+            tempVal = (ninf - solns_[1])/taun
+        elif(eqn == 2):
+            zinf = 1/(1+np.exp((-solns_[3]-39)/5))
+            tempVal = (zinf - solns_[2])/75
+        elif(eqn == 3):
+            m = 1/(1+np.exp((-solns_[3]-30)/9.5))
+            tempVal = (-gna*(m**3)*solns_[0]*(solns_[3]-Vna) - gkdr*(solns_[1]**4)*(solns_[3]-Vk) 
+                       - gks*solns_[2]*(solns_[3]-Vk) - gl*(solns_[3]-Vl) + Idrive - Isyn + Inoise)/C
+            
+    elif category == 'SST':
+        gks = param.gks_SST
+        C = 1 
+        gna = 24
+        gkdr = 3
+        gl = 0.02
+        Vna = 55
+        Vk = -90
+        Vl = -60
+        if(eqn == 0):
+            hinf = 1/(1+np.exp((solns_[3]+53)/7))
+            tauh = .37 + 2.78/(1+np.exp((solns_[3]+40.5)/6))
+            tempVal = (hinf - solns_[0])/tauh 
+        elif(eqn == 1):
+            ninf = 1/(1+np.exp((-solns_[3]-30)/10))
+            taun = .37 + 1.85/(1+np.exp((solns_[3]+27)/15))
+            tempVal = (ninf - solns_[1])/taun
+        elif(eqn == 2):
+            zinf = 1/(1+np.exp((-solns_[3]-39)/5))
+            tempVal = (zinf - solns_[2])/75
+        elif(eqn == 3):
+            m = 1/(1+np.exp((-solns_[3]-30)/9.5))
+            tempVal = (-gna*(m**3)*solns_[0]*(solns_[3]-Vna) - gkdr*(solns_[1]**4)*(solns_[3]-Vk) 
+                       - gks*solns_[2]*(solns_[3]-Vk) - gl*(solns_[3]-Vl) + Idrive - Isyn)/C
+            
+    elif category == 'PV+':
+        C = 1 
+        gna = 35
+        gkdr = 9
+        gl = 0.1
+        Vna = 55
+        Vk = -90
+        Vl = -65    
+        if(eqn == 0):
+            a_h = 0.07*np.exp(-(solns_[3]+58)/20)
+            b_h = 1/(np.exp(-0.1*(solns_[3]+28))+1)
+            phi = 5
+            tempVal = phi*(a_h*(1-solns_[0]) - b_h*solns_[0])
+        elif(eqn == 1):
+            a_n = -0.01*(solns_[3]+34)/(np.exp(-0.1*(solns_[3]+34))-1)
+            b_n = 0.125*np.exp(-(solns_[3]+44)/80)
+            phi = 5
+            tempVal = phi*(a_n*(1-solns_[1])-b_n*solns_[1])
+        elif(eqn == 2):
+            zinf = 1/(1+np.exp((-solns_[3]-39)/5))
+            tempVal = (zinf - solns_[2])/75
+        elif(eqn == 3):
+            a_m = -0.1*(solns_[3]+35)/(np.exp(-0.1*(solns_[3]+35))-1)
+            b_m = 4*np.exp(-(solns_[3]+60)/18)
+            m = a_m/(a_m+b_m)
+            tempVal = (-gna*(m**3)*solns_[0]*(solns_[3]-Vna) - gkdr*(solns_[1]**4)*(solns_[3]-Vk) 
+                       - gks*solns_[2]*(solns_[3]-Vk) - gl*(solns_[3]-Vl) + Idrive - Isyn)/C
+        
+    return tempVal
+
+
+def RK4(t_ind):
+    
+    global neuron
+    
+    for nrn in neurons:
+        
+        
+        solns = nrn.solutions
+        Isyn = nrn.Input_syn
+        Idrive = nrn.Idrive
+        k1 = np.zeros(param.numEquations)
+        k2 = np.zeros(param.numEquations)
+        k3 = np.zeros(param.numEquations)
+        k4 = np.zeros(param.numEquations)
+        
+        init_solns = solns
+        
+        #Calculates the k1 variables
+        for ii in range(len(solns)):
+            k1[ii] = param.stepSize*equations(solns, ii,Isyn,Idrive,nrn)
+
+        #Calculates the k2 variables
+        for ii in range(len(solns)):
+            k2[ii] = param.stepSize*equations(solns+k1/2, ii,Isyn,Idrive,nrn) #important fix done here. solns must be advanced by k
+                                                                    #for calculation of the next k variable.
+        #Calculates the k3 variables
+        for ii in range(len(solns)):
+            k3[ii] = param.stepSize*equations(solns+k2/2, ii,Isyn,Idrive,nrn) 
+
+        #Calculates the k4 variables
+        for ii in range(len(solns)):
+            k4[ii] = param.stepSize*equations(solns+k3, ii,Isyn,Idrive,nrn)
+        
+        #Updates the general solution
+        for ii in range(len(solns)):
+            solns[ii] = init_solns[ii] + (k1[ii] + 2*k2[ii] + 2*k3[ii] + k4[ii])/6 
+            nrn.solutions[ii] = solns[ii]
+            
+            
+            
+def init_nrn(): #initializes neurons and assigns ID, connections, weights, etc. 
+    global neuron
+    neurons = [] #List containing neuron objects
+    nconn_Mat = [np.empty(3)] # 2D matrix for storing new connections.
+    
+    if param.RD_seed: # When true, the simulation will be reproducable entirely (all connections, neuron assignments, initial coniditions).
+        RD.seed(param.sim_seed)
+    
+    def count_SST(neurons): # A function for counting the number of SST neurons.
+        count = 0
+        for nrn in neurons:
+            if nrn.category == 'SST':
+                count += 1
+        return count
+
+    
+    for i in range(param.numnrn):  
+        neurons = np.append(neurons,neuron()) #Intiallizes param.numnrn number of neurons
+        
+        
+    #This for loop ensures that exactly param.numSST number of E neurons are changed to SST.
+    for i in range(param.numSST):
+        changed_to_SST = False #Keeps loop running until excitatory neuron is found to change to SST neuron.
+        while changed_to_SST == False: #Loop mentioned above.
+            nrn = RD.choice(neurons) #grabs one neuron object at random (available for editing)
+            if nrn.category == 'Excitatory': #If true, turns excitatory neuron to SST. If neuron is not Excitatory, while loop runs again.
+                nrn.category = 'SST'
+                nrn.backbone_ID = -1 #Assigns inhibitory neurons to backbone ID = -1.
+                changed_to_SST = True
+                
+    #Create list of only E neurons.
+    Eneurons = []
+    for nrn in neurons:
+        if nrn.category == 'Excitatory':
+            Eneurons.append(nrn) #Note that even though this is a different list than neurons, the neuron objects within can be
+            # changed all the same like they were in neurons. 
+                
+                
+    #Changes all excitatory neurons to having high inhibition (i.e. like LE neurons):
+    for nrn in Eneurons:
+        nrn.gsyn = param.gsynH
+    
+    
+    
+    def create_backbones(Eneurons):
+        #this function initializes backbones into a network assuming that all E neurons have a high gysn (high inhibition level). 
+        # Takes list of excitatory neuron objects as input. WILL NEED TO FIX WITH try->except when num_per_bb > non_bb_size because
+        #then LElist will sample too many elements from templist on last run of loop. 
+        global neuron 
+
+        num_bb = 2 #number of backbones to create from number of available E neurons
+        non_bb_size = 80 #number of non-backbone E neurons to be left in network.
+        num_bb_nrns = param.numnrn - (param.numSST + non_bb_size) #number of neurons for splitting into backbones.
+        num_per_bb = int(num_bb_nrns/num_bb) # number of E neurons per backbone.
+
+        bb_list = RD.sample(Eneurons,num_per_bb) #temp list for looping. Randomly samples num_per_bb # of neurons from Eneurons.
+
+        for bb in range(1,num_bb+1): #This makes the notation easier by shifitng indicies +1. This is because nrn.backbone_ID=0
+        # is reserved for NON-backbone neurons. bb=1 designates backbone_ID=1.
+            templist=[]
+
+            for nrn in bb_list:
+                nrn.backbone_ID = bb # Assigns first randomly chosen group of neurons to the first backbone.
+                nrn.gsyn = param.gsynL #Backbones are created in the "on" state.
+                
+            for nrn in Eneurons: #Makes a new list with only non-backbone nrns.
+                if nrn.backbone_ID == 0:
+                    templist.append(nrn)
+            bb_list = RD.sample(templist,num_per_bb)
+
+        
+        
+    create_backbones(Eneurons)
+
+
+    ID = 0
+    bb_colors = ['cyan','blue','green','orange','purple'] # Colors for backbones, cyan reserved for non-backbone E neurons.
+    for nrn in neurons: #assigns neurons in list their IDs, init voltage, Idrive, etc.
+        nrn.ID = ID
+        ID += 1 
+        nrn.spikeTimes = []
+        nrn.solutions = [RD.random(),RD.random(),RD.random(),RD.uniform(-55,-20)] #Initial conditions of each neuron. Initial voltage randomly assigned between -55 and -20 mV.
+        #nrn.gsyn = round(RD.uniform(0,3),4) #Chooses a connection multiplier between 0 and x.
+        nrn.connectionWeights = [1]*param.numnrn #Creates a list of all connection weights to other neurons at value 1. 
+
+        if nrn.category == 'Excitatory':
+            nrn.Idrive = round(RD.uniform(param.Idrive_min, param.Idrive_max),3) #Random value between min and max rounded to 1 decimal places
+            nrn.color = bb_colors[nrn.backbone_ID] #Assigns nrn color coded for backbone.
+            
+        if nrn.category == 'SST':
+            nrn.color = 'Red' #Inhibitory given red.
+            nrn.Idrive = param.Idrive_SST #Idrive for inhibitory neurons. 
+        if nrn.category == 'PV+':
+            nrn.color = 'darkorange'
+            nrn.Idrive = round(RD.uniform(Idrive_PVplus_min,Idrive_PVplus_max),3)
+    
+    conn_Matrix = np.zeros((param.numnrn,param.numnrn)) #initializes matrix of zeros with param.numnrn x param.numnrn size. Row = nrn #, Column = connected nrn #
+    # Fills matrix with connectivity based on proximity. conn_span # of neurons to right and left are given full connection. 
+    for row_index, row in enumerate(conn_Matrix):
+        for column_index, conn in enumerate(row):
+            
+            if neurons[row_index].category == 'Excitatory': #Determines which connectivity percent to use based on neuron category.
+                conn_span = int(param.c_e*param.numnrn/2) #number of neurons to be connected on either side of a neuron.
+
+                #sets neurons at +- conn_span from diagonal to full connectivity.
+                if column_index >= row_index-conn_span and column_index <= row_index+conn_span:
+                    conn = 1 
+                #Full connectivity at edge case of first neurons connected to last neurons in ring.
+                elif row_index-conn_span < 0 and column_index >= param.numnrn+row_index-conn_span:
+                    conn = 1
+                #Full connectivity at edge case of last neurons connected to first neurons in ring.
+                elif row_index+conn_span > (param.numnrn-1) and column_index <= row_index-param.numnrn+conn_span:
+                    conn = 1 
+                #All other neurons have zero connectivity.
+                else:
+                    conn = 0
+                # Sets diagonal entries to zero.
+                if column_index == row_index:
+                    conn = 0
+                    
+            elif neurons[row_index].category == 'SST' or neurons[row_index].category == 'PV+': # If the presynaptic neuron is inhibitory.
+                if RD.random() <= param.c_i and column_index != row_index: # if a random between 0 and 1 is less than the connectivity percent. 
+                    conn = 1
+                else:
+                    conn = 0
+                    
+            row[column_index] = conn  #Assigns the local connections.
+        conn_Matrix[row_index] = row
+
+    # Changes connections based on proability p. 
+    for row_index, row in enumerate(conn_Matrix): 
+        row_temp = row.copy() #used to store changes while deleting connections from new_conn_list. VERY IMPORTANT TO USE .copy()
+         # otherwise row will change when row_temp is changed. This is how assignment works. 
+        if neurons[row_index].category == 'Excitatory': #Determines which connectivity percent to use based on neuron category.
+            conn_span = int(param.c_e*param.numnrn/2) #number of neurons to be connected on either side of a neuron.
+            p = param.p_e
+        elif neurons[row_index].category == 'SST' or neurons[row_index].category == 'PV+':
+            conn_span = int(param.c_i*param.numnrn/2)
+            p = param.p_i 
+
+        for column_index, conn in enumerate(row):
+            
+            if conn != 0: #only for existing connections.
+                if RD.random() <= p: # RD.random() selects random float between 0 and 1.
+
+                    if param.local_conn == True: # Allows new local connections.
+                        new_conn_list = np.append(np.arange(0,row_index,1),np.arange(row_index+1,param.numnrn,1)) #Creates list of
+                        #all nrn IDs besides self.
+                    if param.local_conn == False: #No new local connections.
+                        #List of all nrns except local and self. Very gross and uses heaviside functions. May be simplifiable. 
+                        new_conn_list = np.append(np.arange(param.numnrn - param.numnrn*np.heaviside(row_index-conn_span-1, 1)
+                                    +(row_index+conn_span-param.numnrn+1)*np.heaviside(row_index+conn_span-param.numnrn,1),row_index-conn_span,1),
+                                    np.arange(row_index+conn_span+1,(param.numnrn+row_index-conn_span)-
+                                    (row_index-conn_span)*np.heaviside(row_index-conn_span, 1),1))
+                     
+                    for index, val in enumerate(row_temp):#Deletes established conns from new_conn_list, preventing double connections.
+
+                        if val != 0: #Sorts out only established conns.
+                            delindex = np.where(new_conn_list == index) #Finds where est. conn lies in new_conn_list.
+                            if len(delindex[0]) > 0: #Stops error from having nothing to delete when param.local_conn = False. 
+                                delindex = delindex[0][0] #grabs useful integer.
+                                new_conn_list = np.delete(new_conn_list, delindex) #deletes from possible conns. 
+    
+                    nconn = RD.choice(new_conn_list) #Randomly selects one neuron to connect to. 
+                    nconn_info = [[row_index, column_index, nconn]] # [neuron #, old connection, new connection]. Must be 2D.
+                    nconn_Mat = np.concatenate((nconn_Mat,nconn_info)) #Adds this info to a matrix for later use.
+                    
+                    #Updates values of the array used in determining new connections. 
+                    row_temp[int(column_index)] = 0 
+                    row_temp[int(nconn)] = 1
+
+
+    nconn_Mat = np.delete(nconn_Mat,0,0) #Removes np.empty dummy row from matrix.
+    
+    #Apply new connection changes.
+    for info in nconn_Mat:
+        conn_Matrix[int(info[0]),int(info[1])] = 0 #Sets old connection to zero.
+        conn_Matrix[int(info[0]),int(info[2])] += 1 #Establishes connection or adds another connection.
+
+    nc_Matrix = np.empty((param.numnrn,param.numnrn,2)) #Empty matrix to hold final values. nc means neuron # and connection strength. 
+    count = 0
+    # Creates 3D array, nc_matrix, storing (nrn #, conn strength to nrn receiving Isyn)
+    for row in conn_Matrix:
+        conn_tuple = list(enumerate(row)) #list of tuples with info (postsyn nrn #, recieving nrn conn strength)
+        nc_Matrix[count] = conn_tuple 
+        count += 1
+
+    
+    #Assigns neuron objects the list of tuple connections. 
+    for nrn in neurons:
+        nrn.connections = nc_Matrix[nrn.ID] #Outgoing connections for nrn.
+        nrn.conn_in = nc_Matrix[:,nrn.ID][:,1]# Incoming connections for nrn. [0,0,1,1] would mean this neuron recieves no
+        # signal from neurons 0 and 1, and full signal from neurons 2 and 3. 
+        
+        
+    def del_crossbb_conns():
+        # This function deletes E-E connections between neurons in different backbones. This prevents the activity of one backbone
+        # form exciting the other.
+        global neuron
+
+        for nrn1 in neurons:
+            for nrn2 in neurons:
+                #The following checks that nrns are not inhibitory (bb=-1) or lower excitatory (bb=0) and are in different backbones with a connection.
+                if nrn1.backbone_ID not in [-1,0] and nrn2.backbone_ID not in [-1,0] and nrn1.backbone_ID != nrn2.backbone_ID and nrn1.connections[int(nrn2.ID)][1] == 1:
+                    nrn1.connections[int(nrn2.ID)][1] = 0 #Eliminates connection between neurons.
+                
+    del_crossbb_conns()
+    
+    def del_LEtobb_conns():
+        # This function deletes LE to BB connections. NOTE that the conn mat/ plas mat are not changed, so they still show these connections as existing.
+        global neuron
+
+        for nrn in neurons:
+            for postsyn, conn in nrn.connections:
+                if nrn.backbone_ID == 0 and neurons[int(postsyn)].backbone_ID in param.bbs_toplot:
+                    nrn.connections[int(postsyn)][1] = 0 #Eliminates connection between neurons.
+
+    #del_LEtobb_conns()
+    
+    
+    return neurons,nc_Matrix
+
+
+
+
+def init_quad_colors(): # Function for initializing the color groups of LE neurons based on their initial connections to bbs.
+    # This function should be run after connections are established (after init_neurons()) but before the t_ind loop for the 
+    # simulation begins.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    LE_sum_cw_bb1,LE_sum_cw_bb2 = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+
+    # Need to fill LE_sum_cw_bbx with number of connections (effectively the cw) from bbx. This will be used to sort for quadrant colors.
+    # LE_sum_cw_bbx is analogous to bbx_REM_vals from BBs_scatter().
+    for LE_nrn in LE_neurons:
+        for index,conn in enumerate(LE_nrn.conn_in):
+            if neurons[index].backbone_ID == 1 and conn == 1: # If presyn is bb1 and connection exists.
+                LE_sum_cw_bb1[LE_neurons.index(LE_nrn)] += 1 # Adds 1 so that at after the loop, index represents total # of
+                                                             # connections from bb1 to this LE nrn.   
+            if neurons[index].backbone_ID == 2 and conn == 1:
+                LE_sum_cw_bb2[LE_neurons.index(LE_nrn)] += 1
+            
+    #Seperating LE neurons into 4 quadrants and assigning them colors. This is based off before learning.
+    #Largest strengths first in lists: (Remember these are LE neuron objects in the lists)
+    LE_sorted_bb1 = [nrn for cw,nrn in sorted(zip(LE_sum_cw_bb1,LE_neurons),reverse=True,key=sort_tuple)]
+    LE_sorted_bb2 = [nrn for cw,nrn in sorted(zip(LE_sum_cw_bb2,LE_neurons),reverse=True,key=sort_tuple)]
+
+    strong_bb1,weak_bb1,strong_bb2,weak_bb2 = [],[],[],[] #Lists for strong and weakly connected neurons.
+    for index in range(len(LE_neurons)):
+        if index < len(LE_neurons)/2: #Sorts strongest half of LE neurons into strong lists.
+            strong_bb1.append(LE_sorted_bb1[index])
+            strong_bb2.append(LE_sorted_bb2[index])
+        else: #Sorts remaining half into weak lists.
+            weak_bb1.append(LE_sorted_bb1[index])
+            weak_bb2.append(LE_sorted_bb2[index])
+
+    #Assigns color to neurons based on what lists they are in:
+    for LE_nrn in LE_neurons:
+        if LE_nrn in strong_bb1 and LE_nrn in strong_bb2: #If LE neuron has strong input from both bbs (top right).
+            LE_nrn.quad_color = 'purple'
+        if LE_nrn in strong_bb1 and LE_nrn in weak_bb2: #If LE neuron has strong input from bb1 and weak from bb2 (Bottom right quadrant)
+            LE_nrn.quad_color = 'blue'
+        if LE_nrn in weak_bb1 and LE_nrn in strong_bb2: # (top left)
+            LE_nrn.quad_color = 'green'
+        if LE_nrn in weak_bb1 and LE_nrn in weak_bb2: # (bottom left)
+            LE_nrn.quad_color = 'pink'
+
+    
+    
+            
+def updateSyn(t_ind): #Gives synaptic input to all neurons on connection list
+    #Includes changes in synaptic strengths. t_start is the time at which the presynaptic neuron's voltage breaches -20 mV.
+    # Has been changed to normalize strength of inputs to a neuron by number of inputs. I.e sum of all inputs comes to param.w_max. 
+    t_temp = 0 
+    global neuron
+    
+    tau = 0.5 #Time constant for fast-acting receptors.
+    tau_B = 50 # Time constant for GABA B receptors, slow-acting.
+    
+    
+    for nrn in neurons:# presynaptic neurons.         
+        if len(nrn.spikeTimes) > 0: # To prevent errors of calling [-1] from an array without any entries. Can change to be l > 2, 3 ...
+            t_temp = nrn.spikeTimes[-1] #grabs time this neuron spikes at.
+
+            for conn in nrn.connections: #Gives all postsynaptic neurons Isyn corrspondping to their voltage.
+                if conn[1] != 0: #Prevents synaptic current from being calculated to non-connected neurons.
+                    
+                    V = neurons[int(conn[0])].solutions[3] #Voltage of postsynaptic neuron. Note conn[1] is the connection strength and conn[0] is the ID.
+                    Isyn = 0 
+
+                    if nrn.category == 'SST' or nrn.category == 'PV+': # Handles GABA A and B receptors in postsyn  neurons.
+                        
+                        E_syn = -75 #Chloride reversal potential. 
+                        
+                        if neurons[int(conn[0])].category == 'SST' or neurons[int(conn[0])].category == 'PV+': # For I-I connections.
+                            for w,t in (param.w_II,tau),(param.w_II_B,tau_B): #Sends two signals, one with w_II/tau and one with param.w_II_B/tau_B. 
+                                Isyn += conn[1]*(w)*np.exp(-param.stepSize*(t_ind-t_temp)/t)*(V - E_syn) # t is tau here. 
+                                
+                        if neurons[int(conn[0])].category == 'Excitatory': # For I->E connections.
+                            gsyn = neurons[int(conn[0])].gsyn #Connection strength multiplier of postsynaptic neuron.
+                            
+                            for w,t in (param.w_IE,tau),(param.w_IE_B,tau_B):
+                                if neurons[int(conn[0])].backbone_ID == 0: # For I->LE connections.
+                                    Isyn += param.SSTtoLE_mult*gsyn*conn[1]*(w)*np.exp(-param.stepSize*(t_ind-t_temp)/t)*(V - E_syn)
+                                else: # For other connections, i.e. I->BB
+                                    Isyn += gsyn*conn[1]*(w)*np.exp(-param.stepSize*(t_ind-t_temp)/t)*(V - E_syn)
+                                    
+                    if nrn.category == 'Excitatory':
+                        
+                        E_syn = 0 # Sodium reversal potential. E_syn = 0 for excitory synapse and E_syn = -75 mV for inhibitory synapse
+                        
+                        if nrn.backbone_ID == 0: # If presynaptic neuron in an LE neuron.
+                            if neurons[int(conn[0])].category == 'SST' or neurons[int(conn[0])].category == 'PV+': # For LE->I connections.
+                                Isyn =param.LE_mult*conn[1]*(param.w_EI)*np.exp(-param.stepSize*(t_ind-t_temp)/tau)*(V - E_syn)
+                            if neurons[int(conn[0])].category == 'Excitatory': # For LE-E connections.
+                                if neurons[int(conn[0])].backbone_ID == 0: # If postsynaptic neuron is LE as well. 
+                                    Isyn = param.LEtoLE_mult*nrn.connectionWeights[int(conn[0])]*conn[1]*(param.w_EE)*np.exp(-param.stepSize*(t_ind-t_temp)/tau)*(V - E_syn)
+                                elif neurons[int(conn[0])].backbone_ID in param.bbs_toplot: # For LE->BB connections
+                                    Isyn =param.LE_mult*nrn.connectionWeights[int(conn[0])]*conn[1]*(param.w_EE)*np.exp(-param.stepSize*(t_ind-t_temp)/tau)*(V - E_syn)
+                        
+                        else: # For non-LE presynaptic E neurons, i.e. BB neurons.
+                            if neurons[int(conn[0])].category == 'SST' or neurons[int(conn[0])].category == 'PV+': # For E->I connections.
+                                Isyn = conn[1]*(param.w_EI)*np.exp(-param.stepSize*(t_ind-t_temp)/tau)*(V - E_syn)
+                            if neurons[int(conn[0])].category == 'Excitatory': # For E-E connections.
+                                if neurons[int(conn[0])].backbone_ID in param.bbs_toplot: # For BB->BB connections.
+                                    Isyn = nrn.connectionWeights[int(conn[0])]*conn[1]*(param.w_EE)*np.exp(-param.stepSize*(t_ind-t_temp)/tau)*(V - E_syn)
+                                if neurons[int(conn[0])].backbone_ID == 0: # For BB -> LE connections.
+                                    Isyn = param.BBtoLE_mult*nrn.connectionWeights[int(conn[0])]*conn[1]*(param.w_EE)*np.exp(-param.stepSize*(t_ind-t_temp)/tau)*(V - E_syn)
+                                    
+                                    
+                    neurons[int(conn[0])].Input_syn += Isyn #Isyn going to Postsynaptic neuron.
+      
+        #Additional portion of updateSyn() for calculating noise probabilities. INDENTATION IS IMPORTANT! MUST BE IN nrn LOOP.
+        noise_mag = 50 #Magnitude of noise input in mV. 
+        probability = 2*10**(-4) #Probability in every integration step that a noise spike will occur for each neuron.
+        t_noise = nrn.start_noise 
+        global neuron
+
+        if RD.random() <= probability: #Handles the start of a noise spike.
+            #print('Noise Spike at Time ',t_ind*param.stepSize)
+            Inoise = noise_mag
+            nrn.start_noise = t_ind #Time at which noise begins 
+        elif nrn.Input_noise != 0 and (t_ind - t_noise)*param.stepSize <= 1: #extends noise input for 1 ms.
+            Inoise = noise_mag
+        else:
+            Inoise = 0 #When there is no noise. 
+
+        nrn.Input_noise = Inoise # Applies noise to neuron. 
+
+    
+    
+    
+            
+def updateSpikeTime(t_ind):
+    global neuron
+    # Variables for old, symmetric, frequency dependent synaptic plasticity rule:
+#     A = 0.6/10 # The maximum amount a synapse can change in strength per spike.
+#     tau = 10 # Time constant for exponential function in ms.
+
+    # For new, unsymmetric plasticity rule. Depotentiation happens more weakly but over a wider time span, while potentiation 
+    # happens stronly but only when the spikes are close together. This rule is also spike timing dependent, so pre->post is
+    # always potentiated and post->pre always depotentiated. This plasticity rule also does not have a frequency dependent
+    # component. For more details see "80 LE Network 5.ipynb". 
+
+
+    for nrn in neurons:
+        
+        # Recording the incoming connection plasticity weights for each neuron:
+        if t_ind % (param.storage_freq/param.stepSize) == 0 and t_ind*param.stepSize >= param.plas_skip_time: #Only runs code every ms (t_ind with only zero in decimal place). Also skips first 500 ms of no plasticity.
+            
+            presyn_weight_list = np.ones(int(param.numnrn)) #List for storing weight connections from each presyn neuron.
+            postsyn_weight_list = np.ones(int(param.numnrn))
+            
+            for nrn_ID in range(param.numnrn): #Loops through presynaptic connections to nrn.
+                presyn_weight_list[int(nrn_ID)] = neurons[int(nrn_ID)].connectionWeights[int(nrn.ID)] #Records value 
+                # of connection weight from presynaptic neuron.
+                postsyn_weight_list[int(nrn_ID)] = nrn.connectionWeights[int(nrn_ID)]
+            
+            nrn.cw_in_history.append([presyn_weight_list, t_ind*param.stepSize]) #Appends conn weights in to this nrn to history. 
+            nrn.cw_out_history.append([postsyn_weight_list, t_ind*param.stepSize]) # Appends conn weights out of this nrn to history.
+
+        # Recording spike times:
+        if nrn.solutions[3] >= param.spikeThreshold and nrn.spike == False and (t_ind*param.stepSize) > param.plas_skip_time: #Selects spikes, skips anything before the first "param.plas_skip_time" ms. 
+            
+            nrn.spikeTimes = np.append(nrn.spikeTimes, t_ind) #Records (time/param.stepSize) of a spike.
+            nrn.spike = True
+                        
+            if nrn.plas_on == True: #If nrn's plas_on is True, plasticity(to and from) nrn is allowed to change. If False, it is frozen.
+
+                
+                #Changes synaptic weights. Note, nrn.connections is a tuple [postsyn, conn] while nrn.conn_in is simply a list of conns where the index is the presyn.
+                # This works using only spikes that have already occured, so in-conns will always be strengthened and out-conns always weakened.
+                for postsyn,conn in nrn.connections: # The outgoing connections. This weakens synapses. 
+
+                    if conn == 1 and nrn.category == 'Excitatory' and neurons[int(postsyn)].category == 'Excitatory' \
+                    and len(neurons[int(postsyn)].spikeTimes) > 0 and neurons[int(postsyn)].plas_on == True: # Existing E-E conns for neurons that have spiked and have plas_on.
+
+                        if (nrn.backbone_ID == neurons[int(postsyn)].backbone_ID and nrn.backbone_ID in param.bbs_toplot)\
+                        or (nrn.backbone_ID == 0 and neurons[int(postsyn)].backbone_ID in param.bbs_toplot): # Excludes inter-BB conns and LE to BB conns from plasticity.
+                            pass # Does nothing if the above is true.
+                        else:
+                            ISI = param.stepSize*abs(neurons[int(postsyn)].spikeTimes[-1] - nrn.spikeTimes[-1]) # The inter-spike interval in ms.
+                            
+                            if ISI <= param.const_ISI: # Portion for the normal exponential STDP rule shape.
+                                nrn.connectionWeights[int(postsyn)] += -param.A_dep*np.exp(-ISI/param.tau_dep) # Weaken synapse.
+                            elif ISI > param.const_ISI: # Portion for the flat line STDP rule shape. Value set to be the 
+                                # value of the STDP rule when the ISI equals const_ISI. 
+                                nrn.connectionWeights[int(postsyn)] += -param.A_dep*np.exp(-param.const_ISI/param.tau_dep) # Weaken synapse.
+                                
+                            if nrn.connectionWeights[int(postsyn)] < 0:
+                                nrn.connectionWeights[int(postsyn)] = 0 #This prevents synaptic weakening below zero, which would simulate inhibition.
+                  
+                
+                for presyn,conn in enumerate(nrn.conn_in): # Incoming connections. This strengthens synapses.
+
+                    if conn == 1 and nrn.category == 'Excitatory' and neurons[int(presyn)].category == 'Excitatory' \
+                    and len(neurons[int(presyn)].spikeTimes) > 0 and neurons[int(presyn)].plas_on == True:
+
+                        if (nrn.backbone_ID == neurons[int(presyn)].backbone_ID and nrn.backbone_ID in param.bbs_toplot)\
+                        or (nrn.backbone_ID in param.bbs_toplot and neurons[int(presyn)].backbone_ID == 0):
+                            pass 
+                        else:
+                            neurons[int(presyn)].connectionWeights[int(nrn.ID)] += param.A_pot*np.exp((-param.stepSize*abs(neurons[int(presyn)].spikeTimes[-1] 
+                                                                                            - nrn.spikeTimes[-1]))/param.tau_pot)# Weaken synapse.
+                            if neurons[int(presyn)].connectionWeights[int(nrn.ID)] > param.w_max:
+                                neurons[int(presyn)].connectionWeights[int(nrn.ID)] = param.w_max # Caps strength at param.w_max.
+                                        
+        
+        
+        if nrn.solutions[3] <= -30 and nrn.spike == True: #Resets the spiking status, allows for next spike to be recorded. 
+            nrn.spike = False
+                                    
+                                    
+
+
+            
+            
+'---------------------------------------------------------------------------'      
+def param_funcs():
+    # Function for creating and returning lists needed in vary_param that don't need to be redone every timestep. 
+    # NOTE: Before I actually implement this function, I need to test whether using it increases or decreases simulation runtime.
+    dummy_var = 0
+
+
+            
+def vary_param(t_ind): #Changes gks of network as well as vary other parameters. I am also added in a component to weaken all synapses after NREM.
+
+    global neuron
+    
+    #Vary gks:
+    t = t_ind*param.stepSize #changes t_ind to ms.
+    gt_list = [] #List containing gks values and the time to impliment them. [[gks val,time(ms)],[...]].
+    
+    times = [i[1] for i in gt_list] # creates list of times from the gt_list.
+    if t in times:
+        gks_val = gt_list[times.index(t)][0] # assigns gks_val the corresponding gks value.
+        param.gks_E,param.gks_SST = gks_val,gks_val #Changes the global variable(s) for gks in the network.
+        
+        
+        
+    # Vary backbone activity:
+    # List indicating times and implimentations. [ [ ['on',[bbs to turn on],'off',[bbs to turn off] ], time(ms)] , [...] ]
+    tot_learning_time = param.simLength - 2*param.num_test_phases*param.BB_len_test #Total learning time, i.e. time not spent in either test phase.
+    
+    # ---------------------------------------------
+    # NOTE: The number of test phases was changed from 2 to 3 when adding post-NREM test to simulation, so tot_learning_time
+    # was changed appropriately.
+    # ---------------------------------------------
+    
+    num_osc = np.floor(tot_learning_time/param.osc_period) # Number of oscillations between BBs during learning.
+    
+    NREM_osc_times = list(range(param.t_start_NREM,param.t_start_NREMtest,param.osc_period)) #List of times for switching BBs in NREM.
+    REM_osc_times = list(range(param.t_start_REM,param.t_start_posttest,param.osc_period)) #List of times for switching BBs in REM.
+    osc_times = NREM_osc_times + REM_osc_times # Concatenates lists to create one list with all oscillation switch times.
+    
+    # Now that I have the times to switch the oscillations at, I need to put them into the form of 
+    # [ [ ['on',[bbs to turn on],'off',[bbs to turn off] ], time(ms)] , [...] ].
+    
+    BB_onoff = [ ['on',[1],'off',[2]] , ['on',[2],'off',[1]] ] # Holds the 2 options for turning BBs on and off. 
+    onoff_index = 0 #Used to assign index from BB_onoff. 
+    bbt_list = [] # Will hold BB activity for learning times.
+    
+    for osc_t in osc_times: # Loops through times at which to switch BBs.
+        bbt_list.append([BB_onoff[onoff_index], osc_t ])
+        
+        if onoff_index == 0: #This keeps switching between BB_onoff indices.
+            onoff_index = 1
+        else:
+            onoff_index = 0
+        
+
+    insert_values = [[['on',[1],'off',[2]],0], [['on',[2],'off',[1]],param.BB_len_test], [['on',[1],'off',[2]],param.t_start_NREMtest],
+                     [['on',[2],'off',[1]],param.t_start_NREMtest+param.BB_len_test], [['on',[1],'off',[2]],param.t_start_posttest],
+                     [['on',[2],'off',[1]],param.t_start_posttest+param.BB_len_test]] #Values (for test phases) to be inserted.
+    
+    # Adding the testing phases to the list.
+    bbt_list.insert(0,insert_values[0]) # Inserting BB activity rules for pre-learning test.
+    bbt_list.insert(1,insert_values[1])
+    
+    
+    # It is more difficult to insert the post-NREM test phase because I have to know between exactly which oscillations
+    # to place it. To use np.where() I need to use arrays.
+    np.warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning) # This eliminates the depreciation warning 
+    # that arises from converting a "ragged" list into an array. I don't think this actually does anything harmful, so I will
+    # supress the warning like this.
+    
+    bbt_array = np.array(bbt_list) # convert to array.
+    
+    post_NREMtest_results = np.where(bbt_array[:,1] > param.t_start_NREMtest) # Object containing first-axis indices of elements in bbt_array where
+    # the time is greater than the start time of NREM test phase, but this object is not the indices themselves.
+    post_NREMtest_indices = post_NREMtest_results[0] # List containing the desired indices.
+    smallest_index = post_NREMtest_indices[0] # Grabs first index in list. This should be the index of the smallest time in
+    # bbt_list that comes after param.t_start_NREMtest.
+    
+    bbt_list.insert(smallest_index,insert_values[2]) # Inserts BB activity rules for post-NREM test.
+    bbt_list.insert(smallest_index+1,insert_values[3])
+    
+    
+    bbt_list.append(insert_values[-2]) # BB activity rules for post-learning test.
+    bbt_list.append(insert_values[-1])
+    
+                
+    times_bb = [i[1] for i in bbt_list]
+
+    if t in times_bb:
+        #print('onoff triggered at',t)
+        #'On' Operations:
+        on_off = bbt_list[times_bb.index(t)][0][0] #This grabs the 'on' string
+        bb_toswitch = bbt_list[times_bb.index(t)][0][1] #Grabs bb IDs to be turned on.
+        bb_onoff(on_off,bb_toswitch)
+        #'Off' Operations:
+        on_off = bbt_list[times_bb.index(t)][0][2] #This grabs the 'off' string
+        bb_toswitch = bbt_list[times_bb.index(t)][0][3] #Grabs bb IDs to be turned off.
+        bb_onoff(on_off,bb_toswitch)
+                
+        
+        
+    #Vary plasticity activity:
+    #List for turning off plasticity to and from specific bbs or LE neurons. [[LE,bb1,bb2],time] , ...
+    plas_onoff_list = [[[False,False,False],0]]#, [[False,False,False],param.t_start_NREMtest], [[False,False,False],param.t_start_posttest]]
+    
+    if param.NABP_boo == True: #For NABP on.
+        plas_onoff_list.insert(1,[[True,True,True],param.t_start_NREM])
+        plas_onoff_list.insert(3,[[True,True,True],param.t_start_REM]) # Turns plasticity back on after post-NREM test phase
+    
+    # Loop through bbt_list used for BB activity and use it to create the plasticity activity list.
+    if param.NABP_boo == False: #Only adds these elements if NABP is supposed to be off. 
+        for item in bbt_list:
+            if item[1] >= param.t_start_NREM and item[1] < param.t_start_NREMtest or item[1] >= param.t_start_REM and \
+            item[1] < param.t_start_posttest: #If the time related to the command is in learning:
+                
+                if item[0][1] == [1] and item[0][3] == [2]:
+                    plas_onoff_list.insert(-1, [[True,True,False],item[1]] ) # Adds element for turning on BB1.
+                if item[0][1] == [2] and item[0][3] == [1]:
+                    plas_onoff_list.insert(-1, [[True,False,True],item[1]] ) # Adds element for turning on BB2.
+            
+    times_plas = [i[1] for i in plas_onoff_list]
+    if t in times_plas: #If the simulation reaches one of desired times:
+        plas_boo_list = plas_onoff_list[times_plas.index(t)][0] #Assigns plas_on the boolean associated with time t. 
+        
+        for nrn in neurons: #Changes plas_on attribute for all neurons to match plas_boo_list vals. Uses index. 
+            nrn.plas_on = plas_boo_list[int(nrn.backbone_ID)]
+        
+        
+'-------------------------------------------------------------------------'   
+        
+    
+    
+    
+def zeroTempVars(): #Zeros all variables to prevent accidental accumulation of unwanted terms. Just a safety measure, good habit.
+        #Note: Do not zero solutions, because they are used in calculating next solutions. 
+        global neuron
+        for nrn in neurons:
+            nrn.Input_syn = 0 #Zeroed because ISyn must be added to account for input from multiple neurons. If Isyn was
+            # simply assigned, the Isyn would not accumulate. But now it must be zeroed. 
+            
+            
+def plot(nc_matrix): #Plots neuron spikes
+    
+    #Plots pixel-plot of neuron connectivities.
+    fig, ax = plt.subplots(1,figsize=(12,12))
+    connplot = ax.imshow(nc_Matrix[:,:,1], extent=(0,param.numnrn,0,param.numnrn), cmap='cividis') #Generates pixel-like plot of connection strengths.
+    ax.grid(which='both', axis='both', color='black', linewidth=1)
+    ax.set_xticks(np.arange(0,param.numnrn,1)) #Sets lines for axes, off of which the grid is based.
+    ax.set_yticks(np.arange(0,param.numnrn,1))
+    ax.set_title('Neuron Connectivity Graphic', size=20)
+    ax.set_xlabel('Postsynaptic Neuron ID',size=12)
+    ax.set_ylabel('(param.numnrn - Presynaptic Neuron ID)',size=12);
+    
+    
+    
+    #Plots Raster plot of neuron spikes.
+    fig, ax1 = plt.subplots(1,figsize=(20,5))
+    start = 0/param.stepSize #time to start plotting from.
+    
+    list1,list2 = [],[]
+    for nrn in neurons: #Seperates neuron IDs into a list of inhibtory and excitory.
+        if nrn.category == 'SST' or nrn.category == 'PV+':
+            list1.append(nrn.ID)
+        if nrn.category == 'Excitatory':
+            list2.append(nrn.ID)
+    neuron_list = list1 + list2 #Adds the two lists such that inhibitory neurons come first and excitory second.
+    
+    for index, ID in enumerate(neuron_list):
+        spikeTimes_toplot = []
+        
+        for t in neurons[ID].spikeTimes: # Runs through spike times of every neuron in 'neuron_list', starting with inhibitory.3
+            if t >= start: #only selects times greater than 'start' for plotting.
+                spikeTimes_toplot = np.append(spikeTimes_toplot,t*param.stepSize)
+        index_plot_list = [index]*len(spikeTimes_toplot)
+        ax1.scatter((spikeTimes_toplot),index_plot_list,c=neurons[ID].color,s=2) # c controls nrn dot color, s controls dot size.
+        
+    ax1.set_title('Raster Plot | ACh Levels: param.gks_E={0}, param.gks_SST={1} | Idrive_E={2}, param.Idrive_SST={3}'
+                  .format(param.gks_E,param.gks_SST,param.Idrive_min,param.Idrive_SST))
+    ax1.set_xlabel('Time (ms)')
+    ax1.set_ylabel('Red - SST, Blue - Excitatory')
+
+    
+    
+def sort_gsyn(item): #Function for returning the gsyn of a neuron
+    # Built to handle nrn simply as an object, and also as a list [nrn_object,index_val].
+    if isinstance(item,tuple): #if item is a tuple.
+        val = item[0].gsyn    
+    elif isinstance(item,neurons[0].__class__): #If this item is object type of a neuron.
+        val = item.gsyn
+    elif isinstance(item, list): #If item is a list.
+        val = item[0].gsyn
+    else:
+        print("Exception: val=0 in sort_gsyn.")
+        val=0
+    return val
+
+
+def sort_Idrive(nrn):
+    return nrn.Idrive
+
+
+def sort_bb(nrn):
+    val = nrn.backbone_ID
+    return val
+
+def sort_bb_tuple(list1):
+    val = list1[0].backbone_ID
+    return val
+                    
+def sort_tuple(tup): #Sorts tuple by first element.
+    val = tup[0]
+    return val
+
+def sort_LE_bycolor(LE_nrn): # Function used to sort LE neurons by color. Green first, then blue, then pink, then purple.
+    val = 0
+    if LE_nrn.quad_color == 'green':
+        val = 1
+    if LE_nrn.quad_color == 'blue':
+        val = 2
+    if LE_nrn.quad_color == 'pink':
+        val = 3
+    if LE_nrn.quad_color == 'purple':
+        val = 4
+    
+    return val
+    
+
+    
+def plot_raster(start_time, nc_Matrix): # Plots raster plot.
+    plot_raster_boo = True
+    
+    list_i,list_bb,list_LE = [],[],[]
+    for nrn in neurons: #Seperates neuron IDs into a list of inhibtory and excitory.
+        if nrn.category == 'SST' or nrn.category == 'PV+':
+            list_i.append(nrn) #Appends full nrn object (not just the ID) to make sorting by gsyn easier.
+        if nrn.category == 'Excitatory' and nrn.backbone_ID in param.bbs_toplot:
+            list_bb.append(nrn)
+        if nrn.category == 'Excitatory' and nrn.backbone_ID == 0: # If an LE neuron
+            list_LE.append(nrn)
+            
+    list_bb.sort(key=sort_bb) # Sorts list by key function. Can reverse order of sort with reverse=True. 
+    list_i.sort(key=sort_bb)
+    list_LE.sort(key=sort_LE_bycolor, reverse=True)
+    
+    neuron_list = list_i + list_LE + list_bb #Adds the two lists such that inhibitory neurons come first and excitory second.
+    
+    
+    if plot_raster_boo: #Plots raster plot of neuron spikes. Ordered with inhibitory on the bottom, followed by sorted E neurons.
+        fig, ax1 = plt.subplots(1,figsize=(20,5))
+        start = start_time/param.stepSize #time to start plotting from.
+
+        for index, nrn in enumerate(neuron_list):
+            spikeTimes_toplot = []
+
+            for t in nrn.spikeTimes: # Runs through spike times of every neuron in 'neuron_list', starting with inhibitory.3
+                if t >= start: #only selects times greater than 'start' for plotting.
+                    spikeTimes_toplot = np.append(spikeTimes_toplot,t*param.stepSize)
+
+            index_plot_list = [index]*len(spikeTimes_toplot)
+            
+            color = nrn.color # Color of spikes plotted for this neuron on raster plot.
+            # Uses quad group color if neuron is LE neuron:
+            if nrn.backbone_ID == 0:
+                color = nrn.quad_color
+                
+            ax1.scatter((spikeTimes_toplot),index_plot_list,c=color,s=2) # c controls nrn dot color, s controls dot size.
+
+        ax1.set_title('Raster Plot')
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('Neurons Sorted by Group');
+        fig.savefig(param.directory+'Raster.pdf',format='pdf') #Saves figure as a pdf file to Zochowski Lab under param.directory. 
+        fig.savefig(param.directory+'Raster.png',format='png')
+        
+    
+    
+    reorder_list = []
+
+    for nrn in neuron_list:
+        reorder_list.append(nrn.ID)
+
+    reorder_list.reverse() #Reverses order to match the setup of raster plot.
+    reor_mat = nc_Matrix[reorder_list] # Creates new matrix reor_mat that is the reordered version of nc_Matrix.
+    
+
+
+
+        
+def plot_mat_onlyE_b(t_ind): # Function that creates new connection and weight matrices from scratch and includes only excitatory neurons.
+    # NOTE: the axis labelling does not match nrn.ID and is only for use with the matrix.
+    plot_conn_sorted = False
+    plot_plas_sorted = True
+    
+    #Create list of only E neurons.
+    neurons_E = []
+    for nrn in neurons:
+        if nrn.category == 'Excitatory':
+            neurons_E.append(nrn)
+    neurons_E.sort(key=sort_bb,reverse=True) # Sorts list by key function. Can reverse order of sort with reverse=True. 
+
+    conn_mat_E = np.empty((len(neurons_E),len(neurons_E)))  # Initialize connection matrix.
+    w_mat_E = np.empty((len(neurons_E),len(neurons_E))) # Initialize weight matrix.
+    
+    for index,nrn in enumerate(neurons_E): #runs through sorted list of E neurons.
+        connections_out = nrn.connections # Creates 2D lists of connections and connection IDs.
+        conn_weights = nrn.connectionWeights #1D list of connection weights for outgoing connections
+        zip_list = list(zip(neurons,connections_out,conn_weights)) #puts nrn connection val, and weight in tuples.
+        zip_list.sort(key=sort_bb_tuple,reverse=True) #Sorts tuples based on gsyn of nrns. 
+        sorted_conn_out = np.array([conn for nrn,conn,weight in zip_list]) #extracts connections sorted by gsyn. This sorts of the columns in the conn matrix.d
+        sorted_weight = np.array([weight for nrn,conn,weight in zip_list]) #extracts weight sorted by gsyn. 
+
+        for postsyn_ID,conn in sorted_conn_out:
+            if neurons[int(postsyn_ID)].category != 'Excitatory': #Eliminates connections to I neurons from list.
+                sorted_weight = np.delete(sorted_weight,np.where(sorted_conn_out[:,0]==postsyn_ID),axis=0) # Deletes element from connection weights list. THIS MUST COME BEFORE deleting connections out element.
+                sorted_conn_out = np.delete(sorted_conn_out,np.where(sorted_conn_out[:,0]==postsyn_ID),axis=0) #Deletes terms that are not going to excitatory neurons.
+        
+        conn_mat_E[index] = sorted_conn_out[:,1] #assigns rows in matrix as modified connection list.
+        w_mat_E[index] = sorted_weight #These two matrices are already sorted once all rows are put in!
+
+    
+    if plot_conn_sorted:
+        #Plots sorted pixel-plot of neuron connectivities.
+        fig, ax = plt.subplots(1,figsize=(10,10))
+        connplot = ax.imshow(conn_mat_E, extent=(0,len(neurons_E),0,len(neurons_E)), cmap='cividis') #Generates pixel-like plot of connection strengths.
+        ax.grid(which='both', axis='both', color='black', linewidth=1)
+        ax.set_xticks(np.arange(0,len(neurons_E),1)) #Sets lines for axes, off of which the grid is based.
+        ax.set_yticks(np.arange(0,len(neurons_E),1))
+        ax.tick_params(labelbottom=False,labelleft=False)#Turns off number labels
+        ax.set_title('Excitatory Only Neuron Connectivity Graphic - Sorted', size=20)
+        ax.set_xlabel('Postsynaptic E Neuron',size=12)
+        ax.set_ylabel('Presynaptic E Neuron (Raster Plot Order)',size=12);
+
+    #Creates custom cmap:
+    colors_array = np.array(['purple','white','darkgreen'])
+    bounds_array = np.array([0,1,param.w_max])
+    norm = plt.Normalize(min(bounds_array),max(bounds_array))
+    tuples = list(zip(map(norm,bounds_array),colors_array))
+    cmap = colors.LinearSegmentedColormap.from_list("my cmap",tuples)
+
+    if plot_plas_sorted:
+        # Plots synaptic weight matrix and colorbar
+        fig, ax_w = plt.subplots(1,figsize=(12,12))
+        weightplot = ax_w.imshow(w_mat_E,extent=(0,len(neurons_E),0,len(neurons_E)), norm=norm, cmap=cmap)
+        ax_w.grid(which='both', axis='both', color='black', linewidth=1)
+        ax_w.set_xticks(np.arange(0,len(neurons_E),1)) #Sets lines for axes, off of which the grid is based.
+        ax_w.set_yticks(np.arange(0,len(neurons_E),1))
+        ax_w.tick_params(labelbottom=False,labelleft=False)#Turns off number labels
+        cbar = fig.colorbar(weightplot,shrink=0.8)
+        cbar.set_label('Synaptic Weight Multiplier')
+        ax_w.set_title('Excitatory Synaptic Weights - Sorted | t={0}'.format(int(t_ind*param.stepSize)), size=20)
+        ax_w.set_xlabel('Postsynaptic E Neuron',size=12)
+        ax_w.set_ylabel('Presynaptic E Neuron (Raster Plot Order)',size=12);
+    
+    
+    return w_mat_E,conn_mat_E
+    
+    
+def plot_bb_mat(show_mats): #PLots seperate E conn and plas matrices for each bb. bb_toplot is list of bb IDs to be plotted.
+    # Note bbs must be in order: [1,2,3,...] or else will get labeled incorrectly on matrices. Show_mats is boolean, True to
+    # plot any matrices, False not to. 
+    plot_conn = False
+    plot_plas = True
+    
+    #Create list of only E neurons.
+    neurons_bb, neurons_LE = [],[]
+#     for nrn in neurons:
+#         if nrn.category == 'Excitatory':
+#             neurons_E.append(nrn)
+#     neurons_E.sort(key=sort_bb,reverse=True)
+#     neurons_E = np.array(neurons_E) #Changing to an array.
+    
+    
+    for nrn in neurons: #Seperates neuron IDs into a list of inhibtory and excitory.
+        if nrn.category == 'Excitatory' and nrn.backbone_ID in param.bbs_toplot:
+            neurons_bb.append(nrn)
+        if nrn.category == 'Excitatory' and nrn.backbone_ID == 0: # If an LE neuron
+            neurons_LE.append(nrn)
+            
+    neurons_bb.sort(key=sort_bb) # Sorts list by key function. Can reverse order of sort with reverse=True. 
+    neurons_LE.sort(key=sort_LE_bycolor)
+    
+    neurons_E = neurons_bb + neurons_LE  #Adds the two lists such that BB neurons come first and LE second.
+    
+    
+    conn_mat_list = [] #list to store conn matrices 
+    w_mat_list = []
+    
+    
+    for bb in param.bbs_toplot:
+        #Selecting only bb and lower E neurons.
+        bb_nrns = []
+        for nrn in neurons_E:
+            if nrn.backbone_ID == 0 or nrn.backbone_ID == bb:
+                bb_nrns.append(nrn)
+  
+        conn_mat = np.empty((len(bb_nrns),len(bb_nrns)))
+        w_mat = np.empty((len(bb_nrns),len(bb_nrns)))
+        
+        for index,nrn in enumerate(bb_nrns): #runs through sorted list of bb nrns
+            connections_out = nrn.connections # Creates 2D lists of connections and connection IDs.
+            conn_weights = nrn.connectionWeights #1D list of connection weights for outgoing connections
+            zip_list = list(zip(neurons,connections_out,conn_weights)) #puts nrn connection val, and weight in tuples.
+            zip_list.sort(key=sort_bb_tuple, reverse=True) #Sorts tuples based on gsyn of nrns. 
+            sorted_conn_out = np.array([conn for nrn,conn,weight in zip_list]) #extracts connections sorted by gsyn. This sorts of the columns in the conn matrix.d
+            sorted_weight = np.array([weight for nrn,conn,weight in zip_list]) #extracts weight sorted by gsyn. 
+
+            for postsyn_ID,conn in sorted_conn_out:
+                if neurons[int(postsyn_ID)].category != 'Excitatory' or (neurons[int(postsyn_ID)].backbone_ID != 0 and neurons[int(postsyn_ID)].backbone_ID != bb): #Eliminates connections to I neurons and other bb
+                    sorted_weight = np.delete(sorted_weight,np.where(sorted_conn_out[:,0]==postsyn_ID),axis=0) # Deletes element from connection weights list. THIS MUST COME BEFORE deleting connections out element.
+                    sorted_conn_out = np.delete(sorted_conn_out,np.where(sorted_conn_out[:,0]==postsyn_ID),axis=0) #Deletes terms that are not going to excitatory neurons.
+
+            conn_mat[index] = sorted_conn_out[:,1] #assigns rows in matrix as modified connection list.
+            w_mat[index] = sorted_weight #These two matrices are already sorted once all rows are put in!
+        
+        
+        if plot_conn and show_mats:
+            #Plots sorted pixel-plot of neuron connectivities.
+            fig, ax = plt.subplots(1,figsize=(8,8))
+            connplot = ax.imshow(conn_mat, extent=(0,len(bb_nrns),0,len(bb_nrns)), cmap='cividis') #Generates pixel-like plot of connection strengths.
+            ax.grid(which='both', axis='both', color='black', linewidth=1)
+            ax.set_xticks(np.arange(0,len(bb_nrns),1)) #Sets lines for axes, off of which the grid is based.
+            ax.set_yticks(np.arange(0,len(bb_nrns),1))
+            ax.tick_params(labelbottom=False,labelleft=False)#Turns off number labels
+            ax.set_title('E Only Connectivity Matrix, bb#{0}'.format(bb), size=20)
+            ax.set_xlabel('Postsynaptic E Neuron',size=12)
+            ax.set_ylabel('Presynaptic E Neuron (Raster Plot Order)',size=12);
+
+        #Creates custom cmap:
+        colors_array = np.array(['purple','white','darkgreen'])
+        bounds_array = np.array([0,1,param.w_max])
+        norm = plt.Normalize(min(bounds_array),max(bounds_array))
+        tuples = list(zip(map(norm,bounds_array),colors_array))
+        cmap = colors.LinearSegmentedColormap.from_list("my cmap",tuples)
+
+        if plot_plas and show_mats:
+            # Plots synaptic weight matrix and colorbar
+            fig, ax_w = plt.subplots(1,figsize=(10,10))
+            weightplot = ax_w.imshow(w_mat,extent=(0,len(bb_nrns),0,len(bb_nrns)), norm=norm, cmap=cmap)
+            ax_w.grid(which='both', axis='both', color='black', linewidth=1)
+            ax_w.set_xticks(np.arange(0,len(bb_nrns),1)) #Sets lines for axes, off of which the grid is based.
+            ax_w.set_yticks(np.arange(0,len(bb_nrns),1))
+            ax_w.tick_params(labelbottom=False,labelleft=False)#Turns off number labels
+            cbar = fig.colorbar(weightplot,shrink=0.8)
+            cbar.set_label('Synaptic Weight Multiplier')
+            ax_w.set_title('E Synaptic Weights, bb#{0}'.format(bb), size=20)
+            ax_w.set_xlabel('Postsynaptic E Neuron',size=12)
+            ax_w.set_ylabel('Presynaptic E Neuron (Raster Plot Order)',size=12);
+            fig.savefig(param.directory+'Plasticity Matrix bb#{0}.pdf'.format(bb),format='pdf')
+            fig.savefig(param.directory+'Plasticity Matrix bb#{0}.png'.format(bb),format='png')
+            
+        conn_mat_list.append(conn_mat) #stores matrix in list. Stored in same order as bb_toplot.
+        w_mat_list.append(w_mat)
+        
+    return
+    
+    
+def plot_voltage(V_data): #Plots the voltages of all neurons.
+    fig, stimplot = plt.subplots(1,figsize=(15,5))
+    stimplot.set_xlabel('time (ms)')
+    stimplot.set_ylabel('Voltage (mV)')
+    stimplot.set_title('Neuron Voltages')
+
+    start = int(0*param.Ntimes) #index for viewing only portions of graph. Set to 0*param.Ntimes for normal graph.
+    end = int(param.simLength*param.Ntimes)
+    for index,V_list in enumerate(V_data):
+        stimplot.plot(param.tarray[start:end],V_list[start:end],color=neurons[index].color,label='Idrive {0}'.format(neurons[index].Idrive))
+        
+    stimplot.legend()
+    tens = np.zeros(len(param.tarray))
+    tens += param.spikeThreshold
+    stimplot.plot(param.tarray[start:end],tens[start:end],'--r')
+    
+    
+def plot_weight(w_data): #Plots the synaptic weights of all connections of all neurons over time.
+    fig, stimplot = plt.subplots(1,figsize=(15,5))
+    stimplot.set_xlabel('time (ms)')
+    stimplot.set_ylabel('Synaptic Weight')
+    stimplot.set_title('Change of synaptic weights over time')
+
+    start = int(0*param.Ntimes) #index for viewing only portions of graph. Set to 0*param.Ntimes for normal graph.
+    end = int(param.simLength*param.Ntimes)
+    for index,w_list in enumerate(w_data):
+        w_list = np.delete(w_list,index,axis=1) #This removes the nonexistant "connection to self" weight variable.
+        stimplot.plot(param.tarray[start:end],w_list[start:end],color=neurons[index].color,label='Presyn nrn {0}'.format(neurons[index].ID))
+        
+    stimplot.legend()
+    
+
+    
+    
+def beep(): #Makes a series of beeps. Meant to signal end of code-running. 
+    if param.makeSound: #When True, plays beeps.
+        winsound.Beep(349,500)
+        winsound.Beep(440,500)
+        winsound.Beep(523,500)
+        
+        
+def Avg_MPC(t_start): #Prints the average mean phase coherence over the entire network. 1 means perfect coherence, i.e. all neurons are locked in phase. 
+    #Be CAREFUL to check that the param.stepSize referenced in this function matches that used in the simulation!!
+    # t_start gives a time at which after to calculate, allowing for skipping of transients. t_start is in ms. 
+    MPC_list = []
+    for nrnb in neurons:
+        for nrna in neurons:
+            if nrnb.ID != nrna.ID and len(nrna.spikeTimes) > 0:
+                phi_list = [] 
+                MPC_ab_complex = 0 #initiate variables.
+                for t_bk in nrnb.spikeTimes: 
+                    if t_bk*param.stepSize >= t_start:
+                        t_ak = max(np.where(nrna.spikeTimes < t_bk, nrna.spikeTimes, 0)) #Finds the latest spiketime from nrna that is
+                        # smaller than nrnb.
+                        t_ak1 = min(np.where(nrna.spikeTimes >= t_bk, nrna.spikeTimes, nrna.spikeTimes[-1]+1))# Finds earliest spiketime
+                        # after or equal to spike from nrnb. When one of the neurons is not spiking, edge case assigned. 
+                        if t_ak != 0 and t_ak1 <= nrna.spikeTimes[-1]: #Eliminating edge cases.
+                            phi_k = 2*round(np.pi,5)*((t_bk - t_ak)/(t_ak1 - t_ak)) #Calculating phase difference between spikes.
+                            phi_list = np.append(phi_list,phi_k)
+
+                            #print(nrnb.ID,t_bk,'  ',nrna.ID, t_ak ,t_ak1)
+
+                for phi_k in phi_list:
+                    MPC_ab_complex += (1/len(phi_list))*np.e**(complex(0,1)*phi_k) #MPC between neurons a and b. 
+
+                MPC_ab = abs(MPC_ab_complex) # Magnitude of complex number
+                MPC_list = np.append(MPC_list, MPC_ab)
+                
+    MPC_avg = sum(MPC_list)/len(MPC_list)
+    print('Average MPC Across Network: ',round(MPC_avg,5))
+    
+    
+def BS(t_start): #Measures burst synchrony, how well network of neurons fire together. 1 is all firing simultaneously,
+    # 0 is complete randomness. t_start is the time (in ms) at which to start running calculations. 
+    calc_t = int(t_start/param.stepSize) #time at which to start synchronization measure.
+    V_all,V2_all = 0,0 #Average voltage of all neurons, average voltage squared.  
+    #V(t)_tavg = (1/(param.tarray[-1]-param.tarray[calc_t]))
+
+    for t in param.tarray[calc_t:-1]: #Integration loop. Integrates over time from calc_t to end of runtime.
+        t_ind = int(t/param.stepSize) #Index for grabbing correct voltages. 
+        V_all += sum(V_data[:,t_ind])/len(neurons) * param.stepSize # Integrating V(t)
+        V2_all += (sum(V_data[:,t_ind])/len(neurons))**2 * param.stepSize # Integrating V(t)^2
+
+    V_tavg = V_all/(param.tarray[-1]-param.tarray[calc_t]) #Time average of mean voltage from all neurons. 
+    V2_tavg = V2_all/(param.tarray[-1]-param.tarray[calc_t])
+
+    V_avg_var = V2_tavg - V_tavg**2 # Equation (2) from link above. Calculates variance of 
+
+    V_i_var = 0 # Average of Variances of all neurons.
+    for nrn in neurons: #Calculating sum of variances of all neurons.  
+        V_i, V2_i = 0,0 #Voltage and voltage squared of ith neuron.
+        for t in param.tarray[calc_t:-1]: #Integration loop. Analagous to above loop.
+            t_ind = int(t/param.stepSize)
+            V_i += V_data[nrn.ID,t_ind] * param.stepSize
+            V2_i += V_data[nrn.ID,t_ind]**2 * param.stepSize
+
+        V_i_var += V2_i/(param.tarray[-1]-param.tarray[calc_t]) - (V_i/(param.tarray[-1]-param.tarray[calc_t]))**2 # Equation (3).
+    V_i_var = V_i_var/len(neurons) #Diving by N. 
+
+    BS = np.sqrt(V_avg_var/V_i_var) #Equation (4), the measure of Burst Synchrony.
+    print('Burst Synchrony Measure: ',round(BS,5))
+    
+    
+def frequency(): #Finds the average frequency of neurons firing in the network.
+    freq_list = []
+    for nrn in neurons:
+        if len(nrn.spikeTimes) > 1: #Avoids divide by zero errors for neurons with only one spike.
+            freq_list.append((len(nrn.spikeTimes)-1)*1000/(param.stepSize*(nrn.spikeTimes[-1]-nrn.spikeTimes[0]))) # Makes a list of average frequency for each neuron.
+    try: #Handles the divide by zero error when there are no spikes.
+        freq_avg = sum(freq_list)/len(freq_list) #Averages this list.
+    except ZeroDivisionError:
+        freq_avg = 0
+    print('Average Frequency: ',round(freq_avg,4),'Hz')
+    
+    
+def frequency_E(): # Function for finding the frequency of excitatory neurons in a network.
+    freq_list = []
+    for nrn in neurons:
+        if len(nrn.spikeTimes) > 1 and nrn.category == 'Excitatory': #Avoids divide by zero errors for neurons with only one spike.
+            freq_list.append((len(nrn.spikeTimes)-1)*1000/(param.stepSize*(nrn.spikeTimes[-1]-nrn.spikeTimes[0]))) # Makes a list of average frequency for each neuron.
+    try: #Handles the divide by zero error when there are no spikes.
+        freq_avg = sum(freq_list)/len(freq_list) #Averages this list.
+    except ZeroDivisionError:
+        freq_avg = 0
+    print('Frequency of Excitatory: ',round(freq_avg,4),'Hz')
+    
+    
+
+def frequency_Theta(): #This function measures the frequency of theta oscillations in a network. A theta oscillation is defined
+    # by a given number of neurons that fire within a given time interval.
+    # NOTE: in order for a good result, theta spikes must be consistent.
+    # NOTE: For higher Idrive_E (i.e. when burst firing occurs in theta spikes), def_time will need to be lowered in order to
+    # accurately capture spiketimes and reset during less active periods.
+    def_param.numnrn = 40 #The number of neurons that must fire within an interval to be recorded as an oscillation.
+    def_time = 10 #The time interval for the neurons to fire in (ms).
+    
+    time_list = np.arange(0,int(len(param.tarray)*param.stepSize)) #This is an array of miliseconds. each element is a time that a theta oscillation will be tested for.
+    spike_boo = False # Boolean for counting spikes.
+    theta_spiketimes = []
+    num_theta_spikes = 0
+    
+    for t in time_list:
+        spikeCount = 0 #Counts number of neurons that spike in interval.
+        for nrn in neurons:
+            spikeTimes_array = param.stepSize*np.array(nrn.spikeTimes) #Changes from list to array and puts time vals in ms. 
+            num_array = spikeTimes_array[abs(spikeTimes_array-t) <= def_time/2] #This is the meat and beans. Selects all spike times that fall within def_time/2 of the time t.
+            spikeCount += len(num_array) # Gathers the number of spikes recorded per neuron inside the interval.   
+                
+        if spikeCount >= def_param.numnrn and spike_boo == False: #If the spikecount is high enough to qualify as a theta spike.
+            theta_spiketimes.append(t) 
+            spike_boo = True
+            
+        elif spikeCount <= 5 and spike_boo == True: #resets spike_boo when there is a segment with no spiking.
+            spike_boo = False
+                    
+    print('Number of Theta Spikes: ',len(theta_spiketimes))
+    calc_freq_list = theta_spiketimes[1:] #Takes out the first spike to be a little more accurate (does it make it better?)
+    try:
+        freq = (len(calc_freq_list)-1)*1000/(calc_freq_list[-1] - calc_freq_list[0]) #Calculates frequency in Hz (1/s). 
+    except IndexError:
+        freq = 0
+    print('Frequency of Theta Oscillation: ',round(freq,2),'Hz')
+    
+    
+def strengthen_backbone(): # Increases strength of all connections between backbone neurons.
+    global neuron
+    for nrn1 in neurons: # Loops over all possible pairs of neurons.
+        for nrn2 in neurons:
+            if nrn1.backbone_ID == nrn2.backbone_ID and nrn1.backbone_ID not in [-1,0] and nrn1.connections[int(nrn2.ID)][1] == 1: #if both neurons are to be part of the same backbone and are actually connected.
+                nrn1.connectionWeights[int(nrn2.ID)] = 2.5 # Strengthens connections between neurons in the same BB.
+                
+                
+                
+def strengthen_LE(): # Gives the LE neurons with largest number of connections from each backbone an increased connection weight
+    # for all those connections, as well as a smaller connection weight for the least connected LE neurons. NOTE that this is 
+    # based off of quad colors, which takes into account the number of connections from both bbs. So, in reality, the LE
+    # neurons with most connections to one bb and also least connections to the other bb have their plasticity weights changed
+    # for those connections. These are the blue and green quad color labeled LE neurons.
+    # This function should be run after init_quad_colors() but before the t_ind loop for the simulation begins.
+    global neuron
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+            
+    for nrn_LE in LE_neurons: # Changes plasticity weight based on quad color.
+        for nrn in neurons:
+            if nrn.connections[int(nrn_LE.ID)][1] == 1: # If connection from nrn to LE nrn exists.
+                
+                if nrn.backbone_ID == 1: # For connections from a bb1 neuron to LE neuron. 
+                    if nrn_LE.quad_color == 'blue':
+                        nrn.connectionWeights[int(nrn_LE.ID)] += param.bg_str # Strenghthens connections to LE neurons that have many
+                        # synapses from bb1 and few synapses from bb2.
+                    if nrn_LE.quad_color == 'green':
+                        nrn.connectionWeights[int(nrn_LE.ID)] += 0 # Weakens connections to LE neurons that have many 
+                        # synapses from bb2 and few synapses from bb1.
+                    if nrn_LE.quad_color == 'purple': #Weakens connections to LE neurons strongly connected to both BBs.
+                        nrn.connectionWeights[int(nrn_LE.ID)] += -param.pu_weak
+                    if nrn_LE.quad_color == 'pink': #Weakens connections to LE neurons weakly connected to both BBs.
+                        nrn.connectionWeights[int(nrn_LE.ID)] += -param.pi_weak
+                        
+                if nrn.backbone_ID == 2: # For connections from a bb2 neuron to LE neuron. 
+                    if nrn_LE.quad_color == 'blue':
+                        nrn.connectionWeights[int(nrn_LE.ID)] += 0 # Strenghthens connections to LE neurons that have many
+                        # synapses from bb1 and few synapses from bb2.
+                    if nrn_LE.quad_color == 'green':
+                        nrn.connectionWeights[int(nrn_LE.ID)] += param.bg_str # Weakens connections to LE neurons that have many 
+                        # synapses from bb2 and few synapses from bb1.
+                    if nrn_LE.quad_color == 'purple': #Weakens connections to LE neurons strongly connected to both BBs.
+                        nrn.connectionWeights[int(nrn_LE.ID)] += -param.pu_weak
+                    if nrn_LE.quad_color == 'pink': #Weakens connections to LE neurons weakly connected to both BBs.
+                        nrn.connectionWeights[int(nrn_LE.ID)] += -param.pi_weak
+                        
+
+
+        
+
+           
+        
+def plot_plasvstime(): # Function that uses nrn.cw_in_history to plot network plasticity vs time. First plot is for E-E
+    # connections, the avg plasticity per connection type group (like BB->BB, BB->LE, LE->BB, and LE->LE). Should be called
+    # after simulation is finished.
+    
+    num_groups = 4 # Number of connection group types. Currently there are four: BB->BB, BB->LE, LE->BB, LE->LE.
+    
+    avg_plas_array = np.zeros((len(param.bbs_toplot),num_groups,np.shape(neurons[0].cw_in_history)[0])) # Array to store averages between groups.
+    # Each row is for each BB, and within each row looks like: [BB->BB, BB->LE, LE->BB, LE->LE]. Stored for every ms.
+    # I may get some bugs here eventually if int((param.simLength-param.plas_skip_time)/param.storage_freq)) spits out a number that is not
+    # the same as the length of cw_out_history.
+    
+    counts = np.zeros((len(param.bbs_toplot),num_groups)) # Array to hold counts for number of connections falling into each category
+    # so that the average value can be found later.
+    
+    for BB_index, BB_ID in enumerate(param.bbs_toplot): # Loops through backbones
+        
+        for nrn in neurons:
+
+            if nrn.category == 'Excitatory':
+                
+                for postsyn_ID, conn in nrn.connections:
+                    
+                    if neurons[int(postsyn_ID)].category == 'Excitatory' and conn == 1: # For E-E connections
+                        
+                        cw_out_hist = nrn.cw_out_history # Grabs full data from presyn neuron.
+
+                        # list to separate the conn weights from the times in cw_out_hist. This is necessary because I later
+                        # need to convert the cw list to an array and this can only be done right if the nested list sizes
+                        # are equal.
+                        cw_out_list = []
+
+                        for (weights, time) in cw_out_hist: # weights is a list, time is a scalar in ms. 
+                            cw_out_list.append(weights)
+
+                        cw_out_array = np.array(cw_out_list) # Needs to be an array for indexing over dimensions.
+
+                        postsyn_cws = cw_out_array[:,int(postsyn_ID)] # Extracts conn weights over time to correct postsyn 
+                        # neuron. Thus postsyn_cws is a 1D list of length (param.simLength - param.plas_skip_time).
+                            
+                        if nrn.backbone_ID == BB_ID and neurons[int(postsyn_ID)].backbone_ID == BB_ID: # BB->BB
+                            
+                            counts[BB_index][0] += 1
+                            avg_plas_array[BB_index][0] += postsyn_cws
+                            
+                        if nrn.backbone_ID == BB_ID and neurons[int(postsyn_ID)].backbone_ID == 0: # BB->LE
+                            
+                            counts[BB_index][1] += 1
+                            avg_plas_array[BB_index][1] += postsyn_cws
+                            
+                        if nrn.backbone_ID == 0 and neurons[int(postsyn_ID)].backbone_ID == BB_ID: # LE->BB
+                            
+                            counts[BB_index][2] += 1
+                            avg_plas_array[BB_index][2] += postsyn_cws
+                            
+                        if nrn.backbone_ID == 0 and neurons[int(postsyn_ID)].backbone_ID == 0: # LE->LE
+                            
+                            counts[BB_index][3] += 1
+                            avg_plas_array[BB_index][3] += postsyn_cws
+
+
+        
+    
+        for i in range(num_groups):
+            avg_plas_array[BB_index][i] = avg_plas_array[BB_index][i]/counts[BB_index][i]
+            
+    time_list = []        
+    for (weights,time) in neurons[0].cw_out_history: # to grab the times of cw storage from the first neuron.
+        time_list.append(time)
+        
+    # Plots plasticity conn weights vs time for each group:
+    labels = ['BB->BB', 'BB->LE', 'LE->BB', 'LE->LE']
+    colors = ['blue', 'cyan', 'lime', 'green']
+    
+    fig, (ax1,ax2) = plt.subplots(2,figsize=(16,16))
+    
+    for BB_index, BB_ID in enumerate(param.bbs_toplot): 
+        
+        for i, cw_data in enumerate(avg_plas_array[BB_index]):
+            
+            if BB_ID == 1:
+                ax1.plot(time_list, cw_data, label=labels[i], color=colors[i])
+                
+            if BB_ID == 2:
+                ax2.plot(time_list, cw_data, label=labels[i], color=colors[i])
+    
+    ax1.set_title('Avg Plasticity of Excitatory Groups', size=20)
+    ax1.set_ylabel('Avg Conn Weight Strength per Synapse - BB1', size=15)
+    ax2.set_ylabel('Avg Conn Weight Strength per Synapse - BB2', size=15)
+    ax2.set_xlabel('Time (ms)', size=15)
+    ax1.legend()
+    ax2.legend()
+    fig.savefig(param.directory+'Plasticity vs Time.pdf',format='pdf')
+    fig.savefig(param.directory+'Plasticity vs Time.png',format='png')
+
+    
+
+
+    
+' May want to delete this function if I can get the cw_in_history working for plotting all the avg plasticity weights'    
+def avg_plas_BBLE(t_ind): # Function to replace to old job of avg_conn_strength_bbs(). This function will calculate average 
+    # plasticity weights between groups of neurons, but do so without having to create a new plasticity matrix every time.
+    
+    t = t_ind*param.stepSize #Changes time to ms.
+    calparam.c_interval = 100 # interval between avgeraging calculations during simulation in ms.
+    quadplot_times = list(range(0,param.simLength+1,calparam.c_interval)) #List of times to plot the quadrant connection strengths at.
+    
+    plas_avg_array = np.empty((len(param.bbs_toplot),4)) # Array to store averages between groups.
+    # Each row is for each BB, and within each row looks like: [BB->BB, BB->LE, LE->BB, LE->LE]
+    
+    counts = np.empty((len(param.bbs_toplot),4)) # Array to hold counts for number of connections falling into each category
+    # so that the average value can be found later.
+    
+    if t in quadplot_times:
+        
+        for BB_index, BB_ID in enumerate(param.bbs_toplot): # Loops through backbones
+            
+            for nrn in neurons:
+                
+                if nrn.category == 'Excitatory':
+                    
+                    for postsyn_ID, conn in nrn.connections:
+                        
+                        if neurons[int(postsyn_ID)].category == 'Excitatory' and conn == 1: # For E-E connections
+                            
+                            if nrn.backbone_ID == BB_ID and neurons[int(postsyn_ID)].backbone_ID == BB_ID: # BB->BB
+                                
+                                plas_avg_array[BB_index][0] += nrn.connectionWeights[int(postsyn_ID)]
+                                counts[BB_index][0] += 1
+                            
+                            if nrn.backbone_ID == BB_ID and neurons[int(postsyn_ID)].backbone_ID == 0: # BB->LE
+                                
+                                plas_avg_array[BB_index][1] += nrn.connectionWeights[int(postsyn_ID)]
+                                counts[BB_index][1] += 1
+                                
+                            if nrn.backbone_ID == 0 and neurons[int(postsyn_ID)].backbone_ID == BB_ID: # LE->BB
+                                
+                                plas_avg_array[BB_index][2] += nrn.connectionWeights[int(postsyn_ID)]
+                                counts[BB_index][2] += 1
+                                
+                            if nrn.backbone_ID == 0 and neurons[int(postsyn_ID)].backbone_ID == 0: # LE->LE
+                                
+                                plas_avg_array[BB_index][3] += nrn.connectionWeights[int(postsyn_ID)]
+                                counts[BB_index][3] += 1
+        
+        
+        
+    
+    
+def bb_onoff(onoff,bb_listtoswitch):
+    # Function for turning backbones on or off through changes in inhibiton level(gsyn multiplier). onoff can be string value 
+    # 'on' or 'off', determining the action to be taken and bb_listtoswitch are the IDs of the backbones to apply this action to.
+    # Also lowers Idrive of non-active backbone to ensure they do not fire.
+    global neurons
+    
+    if onoff == 'on': #Turns on backbone through low gsyn.
+        #print('bb',bb_listtoswitch, 'turned on')
+        for nrn in neurons:
+            if nrn.backbone_ID in bb_listtoswitch: #if the nrn belongs to a backbone in the list.
+                nrn.gsyn = param.gsynL
+                nrn.Idrive = param.Idrive_min #This is the high Idrive value. Could use param.Idrive_max also because there is no distribution of E idrive.
+                
+    if onoff == 'off': #Turns off backbone through high gsyn.
+        #print('bb',bb_listtoswitch,'turned off')
+        for nrn in neurons:
+            if nrn.backbone_ID in bb_listtoswitch:
+                nrn.gsyn = param.gsynH
+                nrn.Idrive = -3 #Low enough to hopefully prevent backbone from theta spiking when it is "off."
+                
+
+                
+def record_gaussian(): # Gives neuron objects their gaussian spike data. Must be run before any dot product functions can work.
+    global neuron 
+    
+    for nrn in neurons: #This loop is to add the spike gaussians to the neurons.
+        spike_gauss_sum = np.zeros(len(param.tarray)) #List to hold all the guassians together from one neuron.
+
+        for spike_time in nrn.spikeTimes: #Note spikeTimes are still in ms/param.stepSize
+            temp_gauss = stats.norm.pdf(param.tarray,loc=int(param.stepSize*spike_time),scale=2) #Temp list to hold 1 spike gaussian. Scale = 2 gives
+            # Gaussian curve of total width about 10 ms. 
+            spike_gauss_sum += temp_gauss #Adds to total sum.
+
+        nrn.spike_gaussian = spike_gauss_sum #updates neuron object to the gaussian curves at each spike time.
+
+                
+                
+def LE_recruited_vec(vec_start,vec_end): #function to quantify how much of a difference there is between which LE neurons are firing with bb1 vs
+    # bb2. vec_start and end are the times from which to add LE spikes to the vector output (in ms). Times given to dotp_activity()
+    # in start_stop_times later become vec_start and vec_end. 
+    # Function has been further modified to create similar vectors for both bbs. 
+    #NOTE: the word "burst" willl be used to talk about the spiking of the network synchronously, such as a theta spike.
+    # Function has AGAIN been modified to instead return fraction of LE neurons firing in bursts, both as a scalar and vector.
+    global neuron
+    #Making list of all LE neurons will be useful.
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    num_LE = len(LE_neurons)
+    
+    #Making list of only bb neurons will also be useful.
+    bb1_neurons = []
+    bb2_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 1:
+            bb1_neurons.append(nrn)
+        elif nrn.backbone_ID == 2:
+            bb2_neurons.append(nrn)
+            
+    num_bb = len(bb1_neurons) #All bbs have the same number of neurons.
+    
+            
+    gauss_threshold = 3 #The threshold value for the magnitude of summed gaussians of all neurons to be considered "inside" a spike.
+    
+    #add the gaussians from each neuron to determine a spike.
+    sum_allnrns = np.zeros(len(param.tarray)) #List for sum of gaussians from all neurons.
+    sum_bbnrns = np.zeros(len(param.tarray)) #List for sum of gaussians for all backbone neurons (from all backbones). 
+    sum_LEnrns = np.zeros(len(param.tarray)) #List for sum of gaussians from LE neurons.
+    for nrn in neurons:
+        sum_allnrns += nrn.spike_gaussian
+        if nrn.backbone_ID == 0: #if LE neuron
+            sum_LEnrns += nrn.spike_gaussian
+        if nrn.backbone_ID != -1 and nrn.backbone_ID != 0: #If not inhbitory or LE neuron.
+            sum_bbnrns += nrn.spike_gaussian
+    
+    #Now I need to run over the all_nrn summed gaussian times and record the intervals in which the spikes occured.
+    inburst = False
+    record_burst = False #boolean to only record a burst start and end time once. 
+    burst_times = [[0,0]] #Defines with dummy element 
+    for t_ind,val in enumerate(sum_allnrns):
+        #The following grabs start and end times of each burst
+        if val >= gauss_threshold and inburst == False and vec_start <= int(param.stepSize*t_ind) <= vec_end: #Places the time contraints on what bursts are considered.
+            burst_start = t_ind
+            inburst = True
+        if val < gauss_threshold and inburst == True:
+            burst_end = t_ind
+            inburst = False
+            record_burst = True
+        #Actually recording a burst time:
+        if record_burst == True : 
+            burst_times.append([burst_start,burst_end])
+            record_burst = False
+    burst_times.pop(0) #eliminates dummy element 
+    
+    
+    #This section creates a vector that counts the number of spikes for neurons within bursts. 
+    
+    burst_vec_LE = np.zeros(num_LE) # For storing nrn spike info in one burst. NOTE THIS LIST MUST HAVE LENGTH = # LE NRNS.
+    burst_vec_bb1 = np.zeros(num_bb) 
+    burst_vec_bb2 = np.zeros(num_bb)
+    
+    for burst_start,burst_end in burst_times: #Loops over bursts
+        
+        #Portion for LE neuron vector:
+        for index, nrn in enumerate(LE_neurons): #Loops through LE neurons. Carefully note that we are not using nrn.ID but rather the
+            # list index of LE_neurons in order to make the basis of the burst_vec vector.
+            for t_spike in nrn.spikeTimes:
+                if burst_start <= t_spike <= burst_end: #Note both t_spike and burst times are in ms/param.stepSize. 
+                    burst_vec_LE[index] += 1 # NOTE: this will count multiple spikes from the same neuron inside a single burst.
+       
+        #Portion for bb neuron vectors:
+        for index, nrn in enumerate(bb1_neurons): #Loops through bb1 neurons.
+                for t_spike in nrn.spikeTimes:
+                    if burst_start <= t_spike <= burst_end:
+                        burst_vec_bb1[index] += 1
+                        
+        for index, nrn in enumerate(bb2_neurons): #Loops through bb2 neurons.
+                for t_spike in nrn.spikeTimes:
+                    if burst_start <= t_spike <= burst_end:
+                        burst_vec_bb2[index] += 1
+
+    # Calculates Fraction of LE neuron spikes that happen in theta bursts over vec_start to vec_end time range:
+    num_LE_spikes_tot = 0 #Counter for total number of LE spikes between vec_start and vec_end.
+    tot_vec_LE = np.zeros(len(LE_neurons)) #Vector for storing the total number of spikes from each LE nrn. 
+    for index,nrn_LE in enumerate(LE_neurons):
+        for t_spike in nrn_LE.spikeTimes:
+            if vec_start <= t_spike*param.stepSize <= vec_end:
+                num_LE_spikes_tot += 1 #Counts the number of LE neuron spikes.
+                tot_vec_LE[index] += 1 #Indexes LE neuron spikes. Records total number of LE spikes for each nrn. 
+
+    num_LE_spikes_burst = sum(burst_vec_LE) #sum of burst_vec_LE is the total number of LE spikes in theta bursts (between vec_start and vec_end).
+    frac_LE_inburst = num_LE_spikes_burst/num_LE_spikes_tot # Fraction of LE spikes in bursts. This is a scalar and for all LE neurons.
+    
+    #Now we divide each index of burst_vec_LE (for LE nrn) by its total number of spikes, giving us a vector where each index
+    # represents the fraction of spikes that LE neuron fired inside theta bursts. A value of 1 means all spikes were in theta bursts.
+    frac_vec_LE = np.zeros(len(LE_neurons))
+    for index,num_burstspikes in enumerate(burst_vec_LE):
+        if tot_vec_LE[index] > 0: #Handles divide by zero case.
+            frac_vec_LE[index] = num_burstspikes/tot_vec_LE[index]
+   
+    frac_vec_LE = frac_vec_LE/np.sqrt(np.dot(frac_vec_LE,frac_vec_LE)) #Normalize by mag. This shouldn't lose any information. 
+    tot_vec_LE = tot_vec_LE/np.sqrt(np.dot(tot_vec_LE,tot_vec_LE)) #Also normalize vector holding all spikes of LE nrns in time range.
+    '''                    
+    #Plots gaussian sums
+    fig,ax1=plt.subplots(2,1,figsize=(20,10))
+    ax1[0].plot(param.tarray[int(vec_start/param.stepSize):int(vec_end/param.stepSize)],sum_allnrns[int(vec_start/param.stepSize):int(vec_end/param.stepSize)])
+    ax1[0].set_title('Gaussian All Neurons')
+    ax1[0].set_xlabel('Time (ms)')
+    ax1[0].set_ylabel('Magnitude of Summed Gaussian Curves')
+    ax1[1].plot(param.tarray[int(vec_start/param.stepSize):int(vec_end/param.stepSize)],sum_LEnrns[int(vec_start/param.stepSize):int(vec_end/param.stepSize)])
+    ax1[1].set_title('Gaussian LE Neurons')
+    ax1[1].set_xlabel('Time (ms)')
+    ax1[1].set_ylabel('Magnitude of Summed Gaussian Curves')
+    '''
+    #Returns vectors indexed with respective neurons. Also returns LE vector with total numbber of spikes in time range.
+    return frac_LE_inburst, frac_vec_LE, tot_vec_LE
+
+
+
+
+def dotp_activity(start_stop_times): #Function that takes a list of start/stop times for LE count vectors and returns the dot product.
+    # start_stop_times = [[vec1_start,vec1_stop],[...],...] (CAN ONLY REALLY TAKE 2 VECTORS AT A TIME).
+    # Note that this function calculates the dot product between two vectors, each of length (# LE neurons), each index representing
+    # a single LE neuron. Each index counts how many times this LE neuron spikes during theta spikes of a backbone or in general. Start and 
+    # stop times should usually be chosen to correlate with the REM stages of each backbone. The dot product between these two 
+    # vectors determines if the same LE neurons fire during REM of the two bbs (dotp ~ 1) or if the bbs have recruited the firing 
+    # of different LE neurons (dotp ~ 0). The function also runs the same process for vectors of the backbone neurons, except it
+    # takes the dot product between a bb vector and an LE vector. 
+    # NOTE: Function modified to process fraction of LE in bursts data. BB processing code deleted.  
+    # NOTE: Function modified again to include dotp calculation based off all LE neuron firing, not just the fraction in theta bursts
+    LE_neurons = []
+    for nrn in neurons: #This is just to get the number of LE neurons and # of neurons in a backbone.
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+            
+    all_vecs_LE = np.array(np.zeros(len(LE_neurons)))
+    all_vecs_tot = np.array(np.zeros(len(LE_neurons)))
+    scalar_frac_LE = [] #List of fraction of LE in burst scalars.
+    #Putting all the vectors together is not useful yet, but it may be in the future. That is why I create all_vecs.
+ 
+    for t_start,t_stop in start_stop_times:
+        frac_LE_inburst,frac_vec_LE,tot_vec_LE = LE_recruited_vec(t_start,t_stop) #vectors of one time period.
+        all_vecs_LE = np.vstack((all_vecs_LE,frac_vec_LE)) #Stores all vectors in one big array.
+        all_vecs_tot = np.vstack((all_vecs_tot,tot_vec_LE))
+        scalar_frac_LE.append(frac_LE_inburst)
+
+    #After deleting the dummy element these lists should contain the same number of vectors as the length of start_stop_times. 
+    all_vecs_LE = np.delete(all_vecs_LE,0,axis=0) # Deletes dummy zeros element. 
+    all_vecs_tot = np.delete(all_vecs_tot,0,axis=0) # Deletes dummy zeros element. 
+    
+    #Now because I can only take the dot product between two vectors and I expect there to only be two vectors(one for each time period)
+    #anyways, I will assume there are only two vectors in the all_vecs vectors.
+    vec1_LE,vec2_LE = all_vecs_LE[0],all_vecs_LE[1]
+    sca1_LE,sca2_LE = scalar_frac_LE[0],scalar_frac_LE[1]
+    # Do the same for all-LE-spike vectors:
+    vec1_tot,vec2_tot = all_vecs_tot[0],all_vecs_tot[1]
+
+
+    # Remember these vectors are already normalized. 
+    
+    dotp_LE = np.dot(vec1_LE,vec2_LE)
+    dotp_tot = np.dot(vec1_tot,vec2_tot)
+    print('LE Fraction of Theta Burst Dotp: ',round(dotp_LE,3),' For Vectors Made at Times: ',start_stop_times)
+    print('Fraction of LE Spikes in Theta Bursts:  bb1:',round(sca1_LE,3),
+          'bb2:',round(sca2_LE,3),' For Vectors Made at Times: ',start_stop_times)
+
+    print('LE Total Firing Dotp: ',round(dotp_tot,3),' For Vectors Made at Times: ',start_stop_times)
+
+    
+    
+    
+def dotp_wvec(t_ind): #function to create weight vectors for each bb to LE then evaluate dot product between them.
+    # FOR 2 BBs ONLY
+    
+    LE_neurons = []
+    for nrn in neurons: #This is just to get the number of LE neurons.
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+            
+    wvec_bb1,wvec_bb2 = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Vectors to hold summed weights from separate bbs for each LE nrn. 
+    
+    for index,LE_nrn in enumerate(LE_neurons): 
+        for nrn in neurons:
+            if nrn.connections[LE_nrn.ID][1] == 1: #If nrn is connected to LE_nrn
+                
+                if nrn.backbone_ID == 1:     
+                    wvec_bb1[index] += nrn.connectionWeights[LE_nrn.ID]  #Adds plas_weight from nrn to LE_nrn to the vector.
+                elif nrn.backbone_ID == 2:
+                    wvec_bb2[index] += nrn.connectionWeights[LE_nrn.ID]
+    
+    #print(wvec_bb1,wvec_bb2)
+    #Normalizing the vectors:
+    wvec_bb1 = wvec_bb1/(np.sqrt(np.dot(wvec_bb1,wvec_bb1)))
+    wvec_bb2 = wvec_bb2/(np.sqrt(np.dot(wvec_bb2,wvec_bb2)))
+    
+    dotp = np.dot(wvec_bb1,wvec_bb2) #Calculates the dot product between to sets of LE neurons. 1 means they have all the
+    #same connectivities, 0 means they have none in common. 
+    print('Plasticity Dot Product Between LE: ',round(dotp,3),' Calculated at: ',round((t_ind*param.stepSize),0))
+    
+
+    
+def NREM_REM_scatter(NR_times,bb,mark_boo): #Plots a scatter plot of 40 points (# of LE neurons), with x axis as total connectivity weight from 
+    # a given backbone after NREM learning, and y axis connectivity weight after REM learning. Takes times of NREM and REM
+    # for which to plot (can only be 2 times). Format: [end of NREM time, end of REM time]. mark_boo tells the function 
+    # whether or not to mark LE neuron with strong cw after REM as blue and weak cw as orange. Make sure to only set
+    # mark_boo=True after bb1 REM, and not after bb2. bb signifies which bb to calculate cw with. 
+    time_NREM = NR_times[0] #Selects the NREM calculation time.
+    time_REM = NR_times[1] #REM calculation time.
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    NREM_vals,REM_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+
+    for nrn_LE in LE_neurons:
+        cw_vec_NREM = nrn_LE.cw_in_history[recorded_times.index(time_NREM)][0] #Vector of cw inputs to nrn at time time_NREM.
+        cw_vec_REM = nrn_LE.cw_in_history[recorded_times.index(time_REM)][0] #Similar, at time time_REM.
+
+        #Now I need to sort through these vectors and find connections comming from backbone bb. 
+        for index,cw in enumerate(cw_vec_NREM): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                NREM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+
+        for index,cw in enumerate(cw_vec_REM): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron.
+
+
+    if mark_boo: #if the boolean mark_boo is true, mark the most stengthened and most weakened neurons after REM.
+                
+        #List below contains LE neurons sorted by REM cw strength, with highest strength first in list. NOTE it is important to
+        # use key to sort, otherwise sorted() reverts to sorting by second element in tuple when two vals in first element of tuple are the same.
+        LE_sortedby_cw = [nrn for cw,nrn in sorted(zip(REM_vals,LE_neurons),reverse=True,key=sort_tuple)]
+        num_ext_nrn = 10 #Number of neurons to be marked on each end, so 2*(num_ext_nrn) will have color changed, half
+        # with the strongest REM conn and half with weakest. This variable changes every loop.
+        for index,LE_nrn in enumerate(LE_sortedby_cw): #Loops through LE neurons starting with ones of highest net conn strength. 
+            if index < num_ext_nrn: #Only loops num_ext_nrn times.
+                if bb == 1:
+                    LE_nrn.scatter_color = 'blue' #Labeled blue as these neurons should be tied to bb1
+                if bb == 2:
+                    LE_nrn.scatter_color = 'green'
+            if index > (len(LE_sortedby_cw)-num_ext_nrn): # Loops over last num_ext_nrn vals.
+                if bb == 1:
+                    LE_nrn.scatter_color = 'orange' #These neurons should be later picked up by bb2. 
+                if bb == 2:
+                    LE_nrn.scatter_color = 'red'
+                
+                    
+
+    #Plotting values and reference diagonal line:
+    x_line = np.arange(0,param.w_max*40) #Creating diagonal line for reference to changes in plasticity.
+    y_line = x_line
+    fig, ax = plt.subplots(1,figsize=(8,8))
+    ax.scatter(NREM_vals,REM_vals,color=[LE_nrn.scatter_color for LE_nrn in LE_neurons])
+    ax.plot(x_line,y_line,color='red') #Reference line
+    ax.set_xlim([0,param.w_max*40/3]) #NOTE 40 is the size of each bb. Should be changed if bb size is changed.
+    ax.set_ylim([0,param.w_max*40/3])
+    ax.set_title('NREM, REM CW to LE From bb{0}'.format(bb),size=15)
+    ax.set_xlabel('Sum of CW after NREM ({0}ms)'.format(time_NREM))
+    ax.set_ylabel('Sum of CW after REM ({0}ms)'.format(time_REM))
+    
+
+        
+        
+def NREM_dREM_scatter(NR_times,bb,mark_boo): #Plots a scatter plot of 40 points (# of LE neurons), with x axis as total connectivity weight from 
+    # a given backbone after NREM learning, and change in y axis connectivity weight after REM learning. Takes times of NREM and REM
+    # for which to plot (can only be 2 times). Format: [end of NREM time, end of REM time]. mark_boo tells the function 
+    # whether or not to mark LE neuron with strong cw after REM as blue and weak cw as orange. Make sure to only set
+    # mark_boo=True after bb1 REM, and not after bb2. bb signifies which bb to calculate cw with. 
+    time_NREM = NR_times[0] #Selects the NREM calculation time.
+    time_REM = NR_times[1] #REM calculation time.
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    NREM_vals,REM_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+
+    for nrn_LE in LE_neurons:
+        cw_vec_NREM = nrn_LE.cw_in_history[recorded_times.index(time_NREM)][0] #Vector of cw inputs to nrn at time time_NREM.
+        cw_vec_REM = nrn_LE.cw_in_history[recorded_times.index(time_REM)][0] #Similar, at time time_REM.
+
+        #Now I need to sort through these vectors and find connections comming from backbone bb. 
+        for index,cw in enumerate(cw_vec_NREM): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                NREM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+
+        for index,cw in enumerate(cw_vec_REM): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron.
+
+
+
+    if mark_boo: #if the boolean mark_boo is true, mark the most stengthened and most weakened neurons after REM.
+        for LE_nrn in LE_neurons: #Gives LE neurons grey color for scatter plot.
+            LE_nrn.scatter_color = 'grey'
+            
+        #List below contains LE neurons sorted by REM cw strength, with highest strength first in list. NOTE it is important to
+        # use key to sort, otherwise sorted() reverts to sorting by second element in tuple when two vals in first element of tuple are the same.
+        LE_sortedby_cw = [nrn for cw,nrn in sorted(zip(REM_vals,LE_neurons),reverse=True,key=sort_tuple)]
+        num_ext_nrn = 10 #Number of neurons to be marked on each end, so 2*(num_ext_nrn) will have color changed, half
+        # with the strongest REM conn and half with weakest. This variable changes every loop.
+        for index,LE_nrn in enumerate(LE_sortedby_cw): #Loops through LE neurons starting with ones of highest net conn strength. 
+            if index < num_ext_nrn: #Only loops num_ext_nrn times.
+                LE_nrn.scatter_color = 'blue' #Labeled blue as these neurons should be tied to bb1
+            if index > (len(LE_sortedby_cw)-num_ext_nrn): # Loops over last num_ext_nrn vals.
+                LE_nrn.scatter_color = 'orange' #These neurons should be later picked up by bb2. 
+                
+                
+    dREM_vals = REM_vals - NREM_vals #This calculates the change in weight during REM.  
+
+    #Plotting values and reference diagonal line:
+    x_line = np.arange(0,param.w_max*40) #Creating diagonal line for reference to changes in plasticity.
+    y_line = np.zeros(len(x_line))
+    fig, ax = plt.subplots(1,figsize=(8,8))
+    ax.scatter(NREM_vals,dREM_vals,color=[LE_nrn.scatter_color for LE_nrn in LE_neurons])
+    ax.plot(x_line,y_line,color='red') #Reference line
+    ax.set_xlim([0,param.w_max*40/3])
+    ax.set_ylim([-param.w_max*40/9,param.w_max*40/9])
+    ax.set_title(r'NREM, $\Delta$REM CW to LE From bb{0}'.format(bb),size=15)
+    ax.set_xlabel('Sum of CW after NREM ({0}ms)'.format(time_NREM))
+    ax.set_ylabel('Change in CW after REM (between {0}ms and {1}ms)'.format(time_NREM,time_REM))
+                    
+        
+        
+        
+def dNREM_dREM_scatter(NREM_start,NR_times,bb,mark_boo): #Plots a scatter plot of 40 points (# of LE neurons), with x axis as total connectivity weight from 
+    # a given backbone after NREM learning, and y axis connectivity weight after REM learning. Takes times of NREM and REM
+    # for which to plot (can only be 2 times). Format: [end of NREM time, end of REM time]. mark_boo tells the function 
+    # whether or not to mark LE neuron with strong cw after REM as blue and weak cw as orange. Make sure to only set
+    # mark_boo=True after bb1 REM, and not after bb2. bb signifies which bb to calculate cw with. 
+    time_NREM = NR_times[0] #Selects the NREM calculation time.
+    time_REM = NR_times[1] #REM calculation time.
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    NREM_vals,REM_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+    start_NREM_vals = np.zeros(len(LE_neurons))
+    
+    for nrn_LE in LE_neurons:
+        cw_vec_NREM = nrn_LE.cw_in_history[recorded_times.index(time_NREM)][0] #Vector of cw inputs to nrn at time time_NREM.
+        cw_vec_REM = nrn_LE.cw_in_history[recorded_times.index(time_REM)][0] #Similar, at time time_REM.
+        cw_vec_start_NREM = nrn_LE.cw_in_history[recorded_times.index(NREM_start)][0] #Vector at start of NREM.
+        
+        #Now I need to sort through these vectors and find connections comming from backbone bb. 
+        for index,cw in enumerate(cw_vec_NREM): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                NREM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+                
+        for index,cw in enumerate(cw_vec_start_NREM): # Same thing as above, but recording initial NREM vals (before learning)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                start_NREM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron.
+
+        for index,cw in enumerate(cw_vec_REM): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron.
+
+    dREM_vals = REM_vals - NREM_vals #This calculates the change in weight during REM. (Assuming REM comes right after NREM) 
+    dNREM_vals = NREM_vals - start_NREM_vals #Change in weight during NREM. 
+                
+
+    if mark_boo: #if the boolean mark_boo is true, mark the most stengthened and most weakened neurons after REM.
+        for LE_nrn in LE_neurons: #Gives nrns colors and fills color list with grey as defeault 
+            LE_nrn.scatter_color = 'grey'
+            
+        #List below contains LE neurons sorted by REM cw strength, with highest strength first in list. NOTE it is important to
+        # use key to sort, otherwise sorted() reverts to sorting by second element in tuple when two vals in first element of tuple are the same.
+        LE_sortedby_cw = [nrn for cw,nrn in sorted(zip(REM_vals,LE_neurons),reverse=True,key=sort_tuple)]
+        num_ext_nrn = 10 #Number of neurons to be marked on each end, so 2*(num_ext_nrn) will have color changed, half
+        # with the strongest REM conn and half with weakest. This variable changes every loop.
+        for index,LE_nrn in enumerate(LE_sortedby_cw): #Loops through LE neurons starting with ones of highest net conn strength. 
+            if index < num_ext_nrn: #Only loops num_ext_nrn times.
+                LE_nrn.scatter_color = 'blue' #Labeled blue as these neurons should be tied to bb1
+            if index > (len(LE_sortedby_cw)-num_ext_nrn): # Loops over last num_ext_nrn vals.
+                LE_nrn.scatter_color = 'orange' #These neurons should be later picked up by bb2. 
+                    
+
+    #Plotting values and reference diagonal line:
+    x_line = np.arange(-param.w_max*40,param.w_max*40) #Creating diagonal line for reference to changes in plasticity.
+    y_line = np.zeros(len(x_line))
+    y_vert = np.arange(-param.w_max*40,param.w_max*40)
+    x_vert = np.zeros(len(y_vert))
+    fig, ax = plt.subplots(1,figsize=(8,8))
+    ax.scatter(dNREM_vals,dREM_vals,color=[LE_nrn.scatter_color for LE_nrn in LE_neurons])
+    ax.plot(x_line,y_line,color='red') #Reference line
+    ax.plot(x_vert,y_vert,color='red') #Reference line
+    ax.set_xlim([-param.w_max*40/9,param.w_max*40/9])
+    ax.set_ylim([-param.w_max*40/9,param.w_max*40/9])
+    ax.set_title(r'$\Delta$NREM, $\Delta$REM CW to LE From bb{0}'.format(bb),size=15)
+    ax.set_xlabel('Change in CW after NREM (between {0}ms and {1}ms)'.format(NREM_start,time_NREM))
+    ax.set_ylabel('Change in CW after REM (between {0}ms and {1}ms)'.format(time_NREM,time_REM))
+    
+    #Plotting dREM vs CW before learning:
+    x_line = np.arange(0,param.w_max*40) #Creating diagonal line for reference to changes in plasticity.
+    y_line = np.zeros(len(x_line))
+    fig, ax1 = plt.subplots(1,figsize=(8,8))
+    ax1.scatter(start_NREM_vals,dREM_vals,color=[LE_nrn.scatter_color for LE_nrn in LE_neurons])
+    ax1.plot(x_line,y_line,color='red') #Reference line
+    ax1.set_title(r'$\Delta$REM, BL CW to LE From bb{0}'.format(bb),size=15)
+    ax1.set_xlabel('CW Before Learning')
+    ax1.set_ylabel('Change in CW after REM (between {0}ms and {1}ms)'.format(time_NREM,time_REM))    
+    ax1.set_xlim(0,param.w_max*40/3)
+    ax1.set_ylim([-param.w_max*40/9,param.w_max*40/9])
+    
+    
+
+
+def CW_scatter(learn_start,learn_middle,learn_end,bb):#I plot 2 graphs, 1) CW after REM or NREM, whichever comes first, vs CW 
+    # before learning. 2) CW after both REM and NREM vs CW before learning. #The learn_start, learn_middle, learn_end are times
+    # corresponding to start of learning, where learning switches between NREM and REM, amd where learning ends for that bb.
+    
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    start_vals,middle_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+    end_vals = np.zeros(len(LE_neurons))
+    
+    for nrn_LE in LE_neurons:
+        cw_vec_start = nrn_LE.cw_in_history[recorded_times.index(learn_start)][0] #Vector of cw inputs to nrn at time time_NREM.
+        cw_vec_middle = nrn_LE.cw_in_history[recorded_times.index(learn_middle)][0] #Similar, at time time_REM.
+        cw_vec_end = nrn_LE.cw_in_history[recorded_times.index(learn_end)][0] #Vector at start of NREM.
+        
+        #Now I need to sort through these vectors and find connections comming from backbone bb. 
+        for index,cw in enumerate(cw_vec_start): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                start_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+                
+        for index,cw in enumerate(cw_vec_middle): # Same thing as above, but recording initial NREM vals (before learning)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                middle_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron.
+
+        for index,cw in enumerate(cw_vec_end): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == bb and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                end_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron.
+
+        
+    
+    x_line = np.arange(0,param.w_max*40) #Creating diagonal line for reference to changes in plasticity.
+    y_line = x_line
+    fig, (ax1,ax2) = plt.subplots(1,2,figsize=(16,8))
+    ax1.scatter(start_vals,middle_vals,color=[LE_nrn.quad_color for LE_nrn in LE_neurons])
+    ax1.plot(x_line,y_line,color='red') #Reference line
+    fig.suptitle(r'Connection Weights During and After Learning of LE Nrns From bb{0}'.format(bb),size=15)
+    ax1.set_xlabel('CW Before Learning ({0} ms)'.format(learn_start))
+    ax1.set_ylabel('CW During Learning ({0} ms)'.format(learn_middle))    
+    ax1.set_xlim(0,param.w_max*40/3)
+    ax1.set_ylim(0,param.w_max*40/3)
+    ax2.scatter(start_vals,end_vals,color=[LE_nrn.quad_color for LE_nrn in LE_neurons])
+    ax2.plot(x_line,y_line,color='red') #Reference line
+    ax2.set_xlabel('CW Before Learning ({0} ms)'.format(learn_start))
+    ax2.set_ylabel('CW After Learning ({0} ms)'.format(learn_end))    
+    ax2.set_xlim(0,param.w_max*40/3)
+    ax2.set_ylim(0,param.w_max*40/3)
+    
+    for index,LE_nrn in enumerate(LE_neurons): #Annotes scatter plot points with nrn ID
+        #num_inhib_conns = return_inhib_conns(LE_nrn)
+        ax1.annotate(LE_nrn.ID,(start_vals[index],middle_vals[index]))
+        ax2.annotate(LE_nrn.ID,(start_vals[index],end_vals[index]))
+    
+    fig.savefig(param.directory+'CW Learning bb#{0}.pdf'.format(bb),format='pdf')
+    fig.savefig(param.directory+'CW Learning bb#{0}.png'.format(bb),format='png')
+    
+    
+        
+def BBs_scatter(RR_times,norm_boo): #Plots a scatter plot of 40 points (# of LE neurons), with x axis as total connectivity weight
+    # from bb1 after learning, and y axis connectivity weight from bb2 after learning. Function takes times for bb1 and bb2
+    # for which to plot (can only be 2 times). Format: [bb1 time, bb2 time]. Note it will usually be useful to 
+    # calculate cw for both bbs after learnig is finished for both bbs, i.e., have both vals RR_times be the same. 
+    # NOTE QUADRANT COLORING is done only for RR_times before learning, but this is dependent on when plasticity is turned on,
+    # so the if-statement below will need to be adjusted if this changes.
+    # norm_boo = True normalizes cw vectors by from 0 to 1.
+    time_bb1 = RR_times[0] #Selects bb1 calc time.
+    time_bb2 = RR_times[1] #bb2 calculation time.
+    
+
+    if time_bb1 != time_bb2: # If the two times provided are not equal.
+        print('Times Provided to BBs_scatter were not equal. This will cause incorrect figure labelling and distort plots.')
+
+    
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    bb1_REM_vals,bb2_REM_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+
+    for nrn_LE in LE_neurons:
+        cw_vec_bb1 = nrn_LE.cw_in_history[recorded_times.index(time_bb1)][0] #Vector of cw inputs to nrn at time time_NREM.
+        cw_vec_bb2 = nrn_LE.cw_in_history[recorded_times.index(time_bb2)][0] #Similar, at time time_REM.
+
+        #Now I need to sort through these vectors and find connections comming from backbone 1. 
+        for index,cw in enumerate(cw_vec_bb1): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == 1 and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                bb1_REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+
+        for index,cw in enumerate(cw_vec_bb2): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == 2 and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                bb2_REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+              
+            
+    #Now I want to calculate center of mass for each group, then dot the COM vectors:
+    COM_bb1_pu,COM_bb1_b,COM_bb1_g,COM_bb1_pi = [],[],[],[] #Lists for finding COM along x axis.
+    COM_bb2_pu,COM_bb2_b,COM_bb2_g,COM_bb2_pi = [],[],[],[] # y axis.
+    
+    if norm_boo == True:
+        # We also want to normalize all values so we can easily compare before and after learning. Do this by dividing all points
+        # by largest value in x and y directions:
+        max_val_bb1,max_val_bb2 = max(bb1_REM_vals),max(bb2_REM_vals)
+        bb1_REM_vals, bb2_REM_vals = bb1_REM_vals/max_val_bb1, bb2_REM_vals/max_val_bb2 #New lists of normalized values.
+    
+    for index,(val1,val2) in enumerate(zip(bb1_REM_vals, bb2_REM_vals)): #Loops over both lists simultaneously. 
+        if LE_neurons[index].quad_color == 'purple':
+            COM_bb1_pu.append(val1), COM_bb2_pu.append(val2)
+        if LE_neurons[index].quad_color == 'blue':
+            COM_bb1_b.append(val1), COM_bb2_b.append(val2)
+        if LE_neurons[index].quad_color == 'green':
+            COM_bb1_g.append(val1), COM_bb2_g.append(val2)
+        if LE_neurons[index].quad_color == 'pink':
+            COM_bb1_pi.append(val1), COM_bb2_pi.append(val2)
+            
+    # Calculating the COM vectors for each color group:
+    COM_pu = np.array([sum(COM_bb1_pu)/len(COM_bb1_pu) , sum(COM_bb2_pu)/len(COM_bb2_pu)]) #Turn into arrays to later use A.dot()
+    COM_b = np.array([sum(COM_bb1_b)/len(COM_bb1_b) , sum(COM_bb2_b)/len(COM_bb2_b)])
+    COM_g = np.array([sum(COM_bb1_g)/len(COM_bb1_g) , sum(COM_bb2_g)/len(COM_bb2_g)])
+    COM_pi = np.array([sum(COM_bb1_pi)/len(COM_bb1_pi) , sum(COM_bb2_pi)/len(COM_bb2_pi)])
+    
+#     #Calculating standard deviation of points from COM. Note COM_bbx_color lists are actually just lists of conn strengths, not COM values.
+#     #vec_color vectors are filled with points for each color group, each with their group's COM as the new origin. 
+#     vecs_pu = [[x_val-COM_pu[0],y_val-COM_pu[1]] for x_val,y_val in zip(COM_bb1_pu,COM_bb2_pu)] 
+#     vecs_b = [[x_val-COM_b[0],y_val-COM_b[1]] for x_val,y_val in zip(COM_bb1_b,COM_bb2_b)]
+#     vecs_g = [[x_val-COM_g[0],y_val-COM_g[1]] for x_val,y_val in zip(COM_bb1_g,COM_bb2_g)]
+#     vecs_pi = [[x_val-COM_pi[0],y_val-COM_pi[1]] for x_val,y_val in zip(COM_bb1_pi,COM_bb2_pi)]
+
+#     #(Std dev) = sqrt( average(vecs^2) ) where vecs are the vectors wrt COM.
+#     stddev_pu = np.sqrt(sum([x**2 + y**2 for x,y in vecs_pu])/len(vecs_pu))
+#     stddev_b = np.sqrt(sum([x**2 + y**2 for x,y in vecs_b])/len(vecs_b))
+#     stddev_g = np.sqrt(sum([x**2 + y**2 for x,y in vecs_g])/len(vecs_g))
+#     stddev_pi = np.sqrt(sum([x**2 + y**2 for x,y in vecs_pi])/len(vecs_pi))
+    
+#     #Calculating cos(theta) = (V . W)/(|V|*|W|):
+#     cos_b_g = COM_b.dot(COM_g)/(np.sqrt(COM_b.dot(COM_b)*COM_g.dot(COM_g))) 
+#     cos_pu_pi = COM_pu.dot(COM_pi)/(np.sqrt(COM_pu.dot(COM_pu)*COM_pi.dot(COM_pi)))
+#     cos_b_pu = COM_b.dot(COM_pu)/(np.sqrt(COM_b.dot(COM_b)*COM_pu.dot(COM_pu)))
+#     cos_g_pu = COM_g.dot(COM_pu)/(np.sqrt(COM_g.dot(COM_g)*COM_pu.dot(COM_pu)))
+    
+#     #Calculates distance between green and blue COM:
+#     diff_b_g = COM_b - COM_g 
+#     dist_b_g = np.sqrt(abs(diff_b_g.dot(diff_b_g))) # Length of vector between COM.
+                      
+                      
+    
+    #Plotting values 
+    #fig, ax = plt.subplots(1,figsize=(8,8))
+    #ax.scatter(bb1_REM_vals,bb2_REM_vals,color=[LE_nrn.scatter_color for LE_nrn in LE_neurons])
+    #ax.set_xlim([0,param.w_max*40/3]) #NOTE 40 is the size of each bb. Should be changed if bb size is changed.
+    #ax.set_ylim([0,param.w_max*40/3])
+    #ax.set_title('CW for bb1 and bb2',size=15)
+    #ax.set_xlabel('Sum of CW for bb1 at ({0}ms)'.format(time_bb1))
+    #ax.set_ylabel('Sum of CW for bb2 at ({0}ms)'.format(time_bb2))
+    
+    # Quadrant Color Graph:
+    fig, ax1 = plt.subplots(1,figsize=(8,8))
+    ax1.scatter(bb1_REM_vals,bb2_REM_vals, color=[LE_nrn.quad_color for LE_nrn in LE_neurons])
+    ax1.scatter([COM_pu[0],COM_b[0],COM_g[0],COM_pi[0]],[COM_pu[1],COM_b[1],COM_g[1],COM_pi[1]],
+                color=['purple','blue','green','pink'], marker='x',s=60) #Plots COM.
+    
+    if norm_boo == True:
+        plot_text = 'Normalized'
+        ax1.set_xlim([0,1.05])
+        ax1.set_ylim([0,1.05])
+    else:
+        plot_text = 'Unnormalized'
+    
+    for index,LE_nrn in enumerate(LE_neurons): #Annotes scatter plot points with nrn ID.
+        ax1.annotate(LE_nrn.ID,(bb1_REM_vals[index],bb2_REM_vals[index]))
+        
+    ax1.set_title('Quad-Based bb1 and bb2 at {0}ms {1}'.format(time_bb1,plot_text),size=15)
+    ax1.set_xlabel('Sum of CW for bb1 at ({0}ms)'.format(time_bb1))
+    ax1.set_ylabel('Sum of CW for bb2 at ({0}ms)'.format(time_bb2))
+    fig.savefig(param.directory+'Quadrant CW at Time={0} {1}.pdf'.format(time_bb1, plot_text),format='pdf')
+    fig.savefig(param.directory+'Quadrant CW at Time={0} {1}.png'.format(time_bb1, plot_text),format='png')
+
+    
+    #print('COM Dot Products: Blue,Green:',round(cos_b_g,4),' Purple,Pink:',round(cos_pu_pi,4),' Blue,Purple:',\
+    #        round(cos_b_pu,4),' Green,Purple:',round(cos_g_pu,4),'  At Time bb1:{0}, bb2:{1}'.format(time_bb1,time_bb2))
+    
+    #print('Distance Between Blue and Green COM: ',dist_b_g)
+    
+    #print('Standard Deviation From COM. Blue: ',stddev_b, ' Green: ',stddev_g)
+    
+    return bb1_REM_vals, bb2_REM_vals
+    
+        
+        
+
+def COM_vectors(time_start, time_end,norm_boo): # Calculates and plots vectors showing movement of COM of quad color groups between
+    # the two times time_start and time_end. norm_boo is boolean, True means normalize COM data and thus the vector plot, while
+    # False means do not normalize. 
+
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+            
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    all_COM_vecs = np.zeros(shape=(1,4,2)) #Array for holding COM vectors.
+    
+    
+    #Loops over times. Each loop finds COM vecs for that time. 
+    for time in [time_start,time_end]:
+
+        bb1_REM_vals,bb2_REM_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+
+        for nrn_LE in LE_neurons:
+            cw_vec_bb1 = nrn_LE.cw_in_history[recorded_times.index(time)][0] #Vector of cw inputs to nrn at time
+            cw_vec_bb2 = nrn_LE.cw_in_history[recorded_times.index(time)][0] 
+
+            #Now I need to sort through these vectors and find connections comming from backbone 1. 
+            for index,cw in enumerate(cw_vec_bb1): # cw is connection weight value (between 0 and param.w_max)
+                if neurons[index].backbone_ID == 1 and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                    bb1_REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+
+            for index,cw in enumerate(cw_vec_bb2): # cw is connection weight value (between 0 and param.w_max)
+                if neurons[index].backbone_ID == 2 and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                    bb2_REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+
+
+
+        #Now I want to calculate center of mass for each group, then dot the COM vectors:
+        COM_bb1_pu,COM_bb1_b,COM_bb1_g,COM_bb1_pi = [],[],[],[] #Lists for finding COM along x axis.
+        COM_bb2_pu,COM_bb2_b,COM_bb2_g,COM_bb2_pi = [],[],[],[] # y axis.
+        
+        if norm_boo == True:
+            #We also want to normalize all values so we can easily compare before and after learning. Do this by dividing all points
+            # by largest value in x and y directions:
+            max_val_bb1,max_val_bb2 = max(bb1_REM_vals),max(bb2_REM_vals)
+            bb1_REM_vals, bb2_REM_vals = bb1_REM_vals/max_val_bb1, bb2_REM_vals/max_val_bb2 #New lists of normalized values.
+
+        for index,(val1,val2) in enumerate(zip(bb1_REM_vals, bb2_REM_vals)): #Loops over both lists simultaneously. 
+            if LE_neurons[index].quad_color == 'purple':
+                COM_bb1_pu.append(val1), COM_bb2_pu.append(val2)
+            if LE_neurons[index].quad_color == 'blue':
+                COM_bb1_b.append(val1), COM_bb2_b.append(val2)
+            if LE_neurons[index].quad_color == 'green':
+                COM_bb1_g.append(val1), COM_bb2_g.append(val2)
+            if LE_neurons[index].quad_color == 'pink':
+                COM_bb1_pi.append(val1), COM_bb2_pi.append(val2)
+
+        # Calculating the COM vectors for each color group:
+        COM_pu = np.array([sum(COM_bb1_pu)/len(COM_bb1_pu) , sum(COM_bb2_pu)/len(COM_bb2_pu)]) #Turn into arrays to later use A.dot()
+        COM_b = np.array([sum(COM_bb1_b)/len(COM_bb1_b) , sum(COM_bb2_b)/len(COM_bb2_b)])
+        COM_g = np.array([sum(COM_bb1_g)/len(COM_bb1_g) , sum(COM_bb2_g)/len(COM_bb2_g)])
+        COM_pi = np.array([sum(COM_bb1_pi)/len(COM_bb1_pi) , sum(COM_bb2_pi)/len(COM_bb2_pi)])
+        
+        all_COM_vecs = np.append(all_COM_vecs,[[COM_pu,COM_b,COM_g,COM_pi]],axis=0) #Adds COM vectors to the array.
+        
+    
+    all_COM_vecs = np.delete(all_COM_vecs,0,axis=0) # Deletes dummy first element from array. Now array looks like:
+    # [ [ [COM_x_pu, COM_y_pu] , [COM_x_b, COM_y_b] , ... ] , ...] where the first element along axis=0 holds COM vectors at
+    # time time_start, and second element holds time_end vectors.
+    
+    diff_COM_vecs = all_COM_vecs[1] - all_COM_vecs[0] # Simply subtract time_start vector componenets from time_end components.
+    
+    plot_vecs = zip(all_COM_vecs[0],diff_COM_vecs) # Combines initial position of COM with change in position for looping.
+    plot_colors = ['purple','blue','green','pink'] # Important that this is same order as groups added to all_COM_vecs.
+    # Time to plot the difference vectors:
+    fig, ax = plt.subplots(1,figsize=(8,8))
+    
+    if norm_boo == True:
+        for index,(xy,dxdy) in enumerate(plot_vecs): #Loops through starting coordinates and change in position for all 4 color groups.
+            ax.arrow(xy[0],xy[1],dxdy[0],dxdy[1],width=0.02,head_width=0.05,head_length=0.02,color=plot_colors[index])
+        
+        ax.set_title('Movement of COM Vectors From Learning (From {0}ms to {1}ms) Normalized'.format(time_start,time_end),size=13)
+        ax.set_xlabel('Normalized Sum of CW from bb1')
+        ax.set_ylabel('Normalized Sum of CW from bb2')
+        ax.set_xlim(0,1.1)
+        ax.set_ylim(0,1.1)
+        fig.savefig(param.directory+'Vector Quadrant Plot ({0},{1}) Normalized.pdf'.format(time_start,time_end),format='pdf')
+        fig.savefig(param.directory+'Vector Quadrant Plot ({0},{1}) Normalized.png'.format(time_start,time_end),format='png')
+        
+    if norm_boo == False:
+        for index,(xy,dxdy) in enumerate(plot_vecs): #Loops through starting coordinates and change in position for all 4 color groups.
+            ax.arrow(xy[0],xy[1],dxdy[0],dxdy[1],width=0.1,head_width=0.2,head_length=0.15,color=plot_colors[index])
+            
+        ax.set_title('Movement of COM Vectors From Learning (From {0}ms to {1}ms) Unnormalized'.format(time_start,time_end),size=13)
+        ax.set_xlabel('Sum of CW from bb1')
+        ax.set_ylabel('Sum of CW from bb2')
+        fig.savefig(param.directory+'Vector Quadrant Plot ({0},{1}) Unnormalized.pdf'.format(time_start,time_end),format='pdf')
+        fig.savefig(param.directory+'Vector Quadrant Plot ({0},{1}) Unnormalized.png'.format(time_start,time_end),format='png')
+        
+        
+        
+def LE_connections(sum_intervals): # Calculates multiple statistics and graphs concerning connecitons to LE neurons.
+    # sum_intervals is a list of all the times of which inbetween the total inhibiton to LE groups will be calculated.
+    global neuron
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+    # Prints blue and green LE neurons, their IDs, and how many inhiitory connections come to them.
+    for LE_nrn in LE_neurons:
+        count = 0
+        if LE_nrn.quad_color == 'blue' or LE_nrn.quad_color == 'green':
+            # Counting the number of incoming inhibitory synapses for each LE neuron:
+            for presyn,conn in enumerate(LE_nrn.conn_in):
+                if neurons[int(presyn)].backbone_ID == -1:
+                    count += conn # conn_in values are all 0 or 1, so summing gives the total in-degree from inhibitory neurons.
+            #print(LE_nrn.quad_color,' nrn, ID = ',LE_nrn.ID,', # inhib conns = ',count)
+            
+    
+    # The next part of this function calculates the strength of connections between different LE groups and then plots them
+    # vs time.
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_to_blue, LE_to_green, LE_to_purple, LE_to_pink = np.zeros(len(recorded_times)),np.zeros(len(recorded_times)) \
+        ,np.zeros(len(recorded_times)),np.zeros(len(recorded_times))#For conns from rest of LE neurons to a group
+    blue_to_blue, green_to_green, purple_to_purple, pink_to_pink = np.zeros(len(recorded_times)),np.zeros(len(recorded_times)) \
+        ,np.zeros(len(recorded_times)),np.zeros(len(recorded_times)) #For conns from a group to itself
+    blue_to_green, green_to_blue = np.zeros(len(recorded_times)),np.zeros(len(recorded_times))
+    
+    # Sorts LE neurons and sums connection weights:
+    for LE_nrn in LE_neurons: 
+        for index, (conn_weights,time) in enumerate(LE_nrn.cw_in_history): # Loops through time, where conn_weights are all incoming connection weights.
+        #  NOTE: by default connection weights are 1, so non-existant connections have a value of 1 in conn_weights.
+        
+            if LE_nrn.quad_color == 'blue': #Connections to blue LE neurons:
+                for presyn_ID, w_conn in enumerate(conn_weights): #Loops through all incoming connection weights.
+                    if neurons[presyn_ID].backbone_ID == 0 and neurons[presyn_ID].connections[LE_nrn.ID][1] == 1: #If the connection
+                    # exists and the presynaptic neuron is an LE neuron:
+                    
+                        if neurons[presyn_ID].quad_color != 'blue': #Sums all conns that are not blue to blue.
+                            LE_to_blue[index] += w_conn
+                        if neurons[presyn_ID].quad_color == 'blue': # Sums all blue to blue conn weights
+                            blue_to_blue[index] += w_conn
+                        if neurons[presyn_ID].quad_color == 'green':
+                            green_to_blue[index] += w_conn
+
+            if LE_nrn.quad_color == 'green': #Connections to green LE neurons:
+                for presyn_ID, w_conn in enumerate(conn_weights): #Loops through all incoming connection weights.
+                    if neurons[presyn_ID].backbone_ID == 0 and neurons[presyn_ID].connections[LE_nrn.ID][1] == 1: #If the connection
+                    # exists and the presynaptic neuron is an LE neuron:
+                        
+                        if neurons[presyn_ID].quad_color != 'green':
+                            LE_to_green[index] += w_conn
+                        if neurons[presyn_ID].quad_color == 'green': # Sums all blue to blue conn weights
+                            green_to_green[index] += w_conn
+                        if neurons[presyn_ID].quad_color == 'blue':
+                            blue_to_green[index] += w_conn
+
+            if LE_nrn.quad_color == 'purple':
+                for presyn_ID, w_conn in enumerate(conn_weights): #Loops through all incoming connection weights.
+                    if neurons[presyn_ID].backbone_ID == 0 and neurons[presyn_ID].connections[LE_nrn.ID][1] == 1: #If the connection
+                    # exists and the presynaptic neuron is an LE neuron:
+                    
+                        if neurons[presyn_ID].quad_color != 'purple':
+                            LE_to_purple[index] += w_conn
+                        if neurons[presyn_ID].quad_color == 'purple': # Sums all blue to blue conn weights
+                            purple_to_purple[index] += w_conn
+
+            if LE_nrn.quad_color == 'pink':
+                for presyn_ID, w_conn in enumerate(conn_weights): #Loops through all incoming connection weights.
+                    if neurons[presyn_ID].backbone_ID == 0 and neurons[presyn_ID].connections[LE_nrn.ID][1] == 1: #If the connection
+                    # exists and the presynaptic neuron is an LE neuron:
+                    
+                        if neurons[presyn_ID].quad_color != 'pink':
+                            LE_to_pink[index] += w_conn
+                        if neurons[presyn_ID].quad_color == 'pink': # Sums all blue to blue conn weights
+                            pink_to_pink[index] += w_conn
+
+    # Now that we have the total connection strength coming into different groups, we divide by the number of neurons to get
+    # the average connection strength to a neuron within each group. First we have to grab the number of neurons in each group.
+    quad_counters = np.zeros(4) #List for holding number of LE neurons in each group. [blue,green,purple,pink]
+    for nrn in neurons:
+        if nrn.quad_color == 'blue':
+            quad_counters[0] += 1
+        if nrn.quad_color == 'green':
+            quad_counters[1] += 1
+        if nrn.quad_color == 'purple':
+            quad_counters[2] += 1
+        if nrn.quad_color == 'pink':
+            quad_counters[3] += 1
+    # Now normalize by the number of neurons:        
+    LE_to_blue, LE_to_green, LE_to_purple, LE_to_pink = LE_to_blue/quad_counters[0], LE_to_green/quad_counters[1],\
+    LE_to_purple/quad_counters[2], LE_to_pink/quad_counters[3]
+    blue_to_blue, green_to_green, purple_to_purple, pink_to_pink = blue_to_blue/quad_counters[0], green_to_green/quad_counters[1],\
+    purple_to_purple/quad_counters[2], pink_to_pink/quad_counters[3]
+    blue_to_green, green_to_blue = blue_to_green/quad_counters[1], green_to_blue/quad_counters[0]
+    
+    # Now we plot the results:
+    fig1, (ax1,ax2) = plt.subplots(2,figsize=(15,15))
+    
+    ax1.plot(recorded_times, LE_to_blue, color='blue', linestyle='dashed')
+    ax1.plot(recorded_times, LE_to_green, color='green', linestyle='dashed')
+    ax1.plot(recorded_times, LE_to_purple, color='purple', linestyle='dashed')
+    ax1.plot(recorded_times, LE_to_pink, color='pink', linestyle='dashed')
+    ax1.set_title('Average Connection Strength From Other LE Groups')
+    ax1.set_xlabel('Time (ms)')
+    ax1.set_ylabel('Summed Connection Strength Divided by 10')
+    
+    ax2.plot(recorded_times, blue_to_blue, color='blue', linestyle='dashed', label='b to b')
+    ax2.plot(recorded_times, green_to_green, color='green', linestyle='dashed', label='g to g')
+    ax2.plot(recorded_times, purple_to_purple, color='purple', linestyle='dashed', label='pu to pu')
+    ax2.plot(recorded_times, pink_to_pink, color='pink', linestyle='dashed', label='pi to pi')
+    ax2.plot(recorded_times, blue_to_green, color='green', label='b to g')
+    ax2.plot(recorded_times, green_to_blue, color='blue', label='g to b')
+    ax2.set_title('Average Connection Strength Inside Own Group and Between Blue and Green')
+    ax2.set_xlabel('Time (ms)')
+    ax2.set_ylabel('Summed Connection Strength Divided by 10')
+    ax2.legend()
+    
+    fig1.savefig(param.directory+'Connection Strengths Between LE Groups.pdf',format='pdf')
+    fig1.savefig(param.directory+'Connection Strengths Between LE Groups.png',format='png')
+
+
+    
+    
+def return_inhib_conns(nrn):
+    # Function that returns the number of inhibitory connections to "nrn".
+    count = 0
+    for presyn,conn in enumerate(nrn.conn_in):
+        if neurons[int(presyn)].backbone_ID == -1:
+            count += conn # conn_in values are all 0 or 1, so summing gives the total in-degree from inhibitory neurons.
+            
+    return count #Returns number of inhibitory conns to this nrn. 
+
+
+
+def barplots(): #Function for making all the barplots.
+    
+    # --------------------------------------------
+    # LE group activity:
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    # These arrays will store the gaussian activities for all neurons in their group summed together.        
+    act_b,act_g,act_pu,act_pi = np.zeros(len(param.tarray)),np.zeros(len(param.tarray)),np.zeros(len(param.tarray)),np.zeros(len(param.tarray))
+    
+    for LE_nrn in LE_neurons: #This stores the complete activity data for each group.
+        if LE_nrn.quad_color == 'blue':
+            act_b += LE_nrn.spike_gaussian
+        if LE_nrn.quad_color == 'green':
+            act_g += LE_nrn.spike_gaussian
+        if LE_nrn.quad_color == 'purple':
+            act_pu += LE_nrn.spike_gaussian
+        if LE_nrn.quad_color == 'pink':
+            act_pi += LE_nrn.spike_gaussian
+            
+    # Now the activity data will be seperated into bins and summed for barplot plotting. We want data for each BB during every
+    # phase, so that comes out to 8 bar plot bins.
+    bars_b,bars_g,bars_pu,bars_pi = np.zeros(8),np.zeros(8),np.zeros(8),np.zeros(8)
+    
+    # The gaussian data from act_x are seperated into time chunks corresponding with each phase and BB activity. The data from
+    # this time chunk is then summed and normalized by the length of time over which the data spanned.
+    # NOTE that spike.gaussian data is in t_ind increments, so the phase times need to be divided by param.stepSize. (Also, I may be
+    # able to rewrite this code into a loop so I don't have to write it all out...)
+    
+    # Pre-learning test phase:
+    bars_b[0] += sum(act_b[int((param.plas_skip_time+50)/param.stepSize):int(param.BB_len_test/param.stepSize)])/(param.BB_len_test-(param.plas_skip_time+50))
+    bars_g[0] += sum(act_g[int((param.plas_skip_time+50)/param.stepSize):int(param.BB_len_test/param.stepSize)])/(param.BB_len_test-(param.plas_skip_time+50))
+    bars_pu[0] += sum(act_pu[int((param.plas_skip_time+50)/param.stepSize):int(param.BB_len_test/param.stepSize)])/(param.BB_len_test-(param.plas_skip_time+50))
+    bars_pi[0] += sum(act_pi[int((param.plas_skip_time+50)/param.stepSize):int(param.BB_len_test/param.stepSize)])/(param.BB_len_test-(param.plas_skip_time+50))
+    bars_b[1] += sum(act_b[int(param.BB_len_test/param.stepSize):int(param.t_start_NREM/param.stepSize)])/(param.t_start_NREM-param.BB_len_test)
+    bars_g[1] += sum(act_g[int(param.BB_len_test/param.stepSize):int(param.t_start_NREM/param.stepSize)])/(param.t_start_NREM-param.BB_len_test)
+    bars_pu[1] += sum(act_pu[int(param.BB_len_test/param.stepSize):int(param.t_start_NREM/param.stepSize)])/(param.t_start_NREM-param.BB_len_test)
+    bars_pi[1] += sum(act_pi[int(param.BB_len_test/param.stepSize):int(param.t_start_NREM/param.stepSize)])/(param.t_start_NREM-param.BB_len_test)
+    
+    # NREM phase:
+    bars_b[2] += sum(act_b[int(param.t_start_NREM/param.stepSize):int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_g[2] += sum(act_g[int(param.t_start_NREM/param.stepSize):int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_pu[2] += sum(act_pu[int(param.t_start_NREM/param.stepSize):int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_pi[2] += sum(act_pi[int(param.t_start_NREM/param.stepSize):int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_b[3] += sum(act_b[int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize):int((param.t_start_REM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_g[3] += sum(act_g[int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize):int((param.t_start_REM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_pu[3] += sum(act_pu[int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize):int((param.t_start_REM)/param.stepSize)])/(param.BB_len_NREM)
+    bars_pi[3] += sum(act_pi[int((param.t_start_NREM+param.BB_len_NREM)/param.stepSize):int((param.t_start_REM)/param.stepSize)])/(param.BB_len_NREM)
+    
+    # REM phase:
+    bars_b[4] += sum(act_b[int((param.t_start_REM)/param.stepSize):int((param.t_start_REM+param.BB_len_REM)/param.stepSize)])/(param.BB_len_REM)
+    bars_g[4] += sum(act_g[int((param.t_start_REM)/param.stepSize):int((param.t_start_REM+param.BB_len_REM)/param.stepSize)])/(param.BB_len_REM)
+    bars_pu[4] += sum(act_pu[int((param.t_start_REM)/param.stepSize):int((param.t_start_REM+param.BB_len_REM)/param.stepSize)])/(param.BB_len_REM)
+    bars_pi[4] += sum(act_pi[int((param.t_start_REM)/param.stepSize):int((param.t_start_REM+param.BB_len_REM)/param.stepSize)])/(param.BB_len_REM)
+    bars_b[5] += sum(act_b[int((param.t_start_REM+param.BB_len_REM)/param.stepSize):int((param.t_start_posttest)/param.stepSize)])/(param.BB_len_REM)
+    bars_g[5] += sum(act_g[int((param.t_start_REM+param.BB_len_REM)/param.stepSize):int((param.t_start_posttest)/param.stepSize)])/(param.BB_len_REM)
+    bars_pu[5] += sum(act_pu[int((param.t_start_REM+param.BB_len_REM)/param.stepSize):int((param.t_start_posttest)/param.stepSize)])/(param.BB_len_REM)
+    bars_pi[5] += sum(act_pi[int((param.t_start_REM+param.BB_len_REM)/param.stepSize):int((param.t_start_posttest)/param.stepSize)])/(param.BB_len_REM)
+    
+    # Post-learning test phase:
+    bars_b[6] += sum(act_b[int((param.t_start_posttest)/param.stepSize):int((param.t_start_posttest+param.BB_len_test)/param.stepSize)])/(param.BB_len_test)
+    bars_g[6] += sum(act_g[int((param.t_start_posttest)/param.stepSize):int((param.t_start_posttest+param.BB_len_test)/param.stepSize)])/(param.BB_len_test)
+    bars_pu[6] += sum(act_pu[int((param.t_start_posttest)/param.stepSize):int((param.t_start_posttest+param.BB_len_test)/param.stepSize)])/(param.BB_len_test)
+    bars_pi[6] += sum(act_pi[int((param.t_start_posttest)/param.stepSize):int((param.t_start_posttest+param.BB_len_test)/param.stepSize)])/(param.BB_len_test)
+    bars_b[7] += sum(act_b[int((param.t_start_posttest+param.BB_len_test)/param.stepSize):int((param.simLength)/param.stepSize)])/(param.BB_len_test)
+    bars_g[7] += sum(act_g[int((param.t_start_posttest+param.BB_len_test)/param.stepSize):int((param.simLength)/param.stepSize)])/(param.BB_len_test)
+    bars_pu[7] += sum(act_pu[int((param.t_start_posttest+param.BB_len_test)/param.stepSize):int((param.simLength)/param.stepSize)])/(param.BB_len_test)
+    bars_pi[7] += sum(act_pi[int((param.t_start_posttest+param.BB_len_test)/param.stepSize):int((param.simLength)/param.stepSize)])/(param.BB_len_test)
+    
+    # Here the data is plotted on a barplot:
+    # This gives the x-axis location of where each bar will be placed on the plot:
+    locations_b = np.array([0,5,13,18,26,31,39,44])
+    locations_g = locations_b + 1
+    locations_pu = locations_b + 2
+    locations_pi = locations_b + 3
+    
+    fig, ax1 = plt.subplots(1,figsize=(15,5))
+    ax1.bar(locations_b,bars_b,align='edge',color='blue')
+    ax1.bar(locations_g,bars_g,align='edge',color='green')
+    ax1.bar(locations_pu,bars_pu,align='edge',color='purple')
+    ax1.bar(locations_pi,bars_pi,align='edge',color='pink')
+    ax1.set_xticks(locations_pu) #This places the x-axis labels in the center of each bar group.
+    ax1.set_xticklabels(['Pre BB1','Pre BB2','NREM First Half','NREM Second Half','REM First Half','REM Second Half','Post BB1','Post BB2']);
+    ax1.set_title('LE Activity Over Time')
+    ax1.set_ylabel('Activity Normalized by Phase Length')
+    
+    fig.savefig(param.directory+'LE Activity Barplot.pdf',format='pdf')
+    fig.savefig(param.directory+'LE Activity Barplot.png',format='png')
+    
+    
+    # --------------------------------------------
+    # Activity Dot Product:
+    # ALTERED FOR TOTAL NUMBER OF LE SPIKES, INSTEAD OF LE FRACTION IN THETA BURSTS.
+    
+    # This phase_periods list holds all the start and stop times designating the backbone activities within each phase of the
+    # simulation. [ [[phase 1 BB1 start, phase 1 BB1 end],[phase 1 BB2 start, phase 1 BB2 end]], [phase 2....], ...].
+    # Old code for measuring LE activity as a fraction of activity within theta bursts is commented out in the code.
+    phase_periods = np.array([[[param.plas_skip_time+50,param.BB_len_test],[param.BB_len_test+50,param.t_start_NREM]],
+                     [[param.t_start_NREM+50,param.t_start_NREM+param.BB_len_NREM],[param.t_start_NREM+param.BB_len_NREM+50,param.t_start_REM]],
+                     [[param.t_start_REM+50,param.t_start_REM+param.BB_len_REM],[param.t_start_REM+param.BB_len_REM+50,param.t_start_posttest]],
+                     [[param.t_start_posttest+50,param.t_start_posttest+param.BB_len_test],[param.t_start_posttest+param.BB_len_test+50,param.simLength]]])
+    
+    #ALL_scalars_LE = np.empty((0,2)) #Array for holding the scalar fraction of LE firing within theta burst values for all phases.
+    ALL_dotp_tot = np.empty((0,1)) # Array for holding dot products between normalized activity vectors for each phase.
+    ALL_dotp_ratio = np.empty((0,1)) # Holds dot product ratios of (activity dotp)/(randomly shuffled vector dotp)
+    ALL_rand_dotp_avg = np.empty((0,1)) # Holds dotp randomized averages for each phase.
+ 
+    for phase in phase_periods: #Loops through phases, i.e. pre-learning test, NREM, REM, and post-learning test.
+        
+        
+        #scalars_LE = [] #List of 'fraction of LE in burst' scalars. This is only for one phase.
+        #vecs_LE = np.array(np.zeros(len(LE_neurons))) # Array for holding the two LE activity vectors. Only for one phase.
+        vecs_tot = np.array(np.zeros(len(LE_neurons))) # _tot vectors indicate data from all-LE firing, not just the fraction in theta bursts.
+        
+        for BB_t_start,BB_t_stop in phase: #Loops through the start and stop times of each BB. (ONLY 2 LOOPS if simulation has 2 BBs)
+            BB_scalar_LE,BB_vec_LE,BB_vec_tot = LE_recruited_vec(BB_t_start,BB_t_stop) #vector of one time period. Remember the vector (second
+            # term) output from LE_recruited_vec is really a vector where each index represents an LE neuron, and the value of that
+            # index is the fraction of spikes from that LE neuron that were inside theta bursts over the time period BB_t_start to
+            # BB_t_stop. Note this vector is normalized. 
+           #vecs_LE = np.vstack((vecs_LE,BB_vec_LE)) #Stores vectors from both BBs in one array.
+           #scalars_LE.append(BB_scalar_LE) #Stores scalars from both BBs in one list. 
+            vecs_tot = np.vstack((vecs_tot,BB_vec_tot))
+
+        #After deleting the dummy element these lists should contain the same number of vectors as the length of start_stop_times. 
+        #vecs_LE = np.delete(vecs_LE,0,axis=0) # Deletes dummy zeros element. 
+        vecs_tot = np.delete(vecs_tot,0,axis=0) # Deletes dummy zeros element. 
+        
+        # Now I am going to randomize the order of LE neurons in these two vectors, and then take the dot product between them. 
+        # This process will be repeated 100 times to get an average for the dot product.
+        #BB1_LE_vec,BB2_LE_vec = vecs_LE[0],vecs_LE[1] # Grabs LE fraction-in-theta vectors. 
+        BB1_tot_vec, BB2_tot_vec = vecs_tot[0],vecs_tot[1] # This works because there are only two BBs, so vecs_tot only has 
+        # length = 2 along its first axis.
+        
+        rand_dotp_sum = 0 # This holds the sum of dot products between the randomly shuffled vectors.
+        
+        for i in range(100): # Done 100 times just to ensure a good average value
+            rand_BB1_tot_vec,rand_BB2_tot_vec = BB1_tot_vec,BB2_tot_vec #Make copies to shuffle.
+            np.random.shuffle(rand_BB1_tot_vec),np.random.shuffle(rand_BB2_tot_vec) #shuffles the vector elements randomly. This mixes up the order of LE
+            # neuron activities in the vector.
+            rand_dotp_sum += np.dot(rand_BB1_tot_vec,rand_BB2_tot_vec) #Sums each dot product.
+        
+        
+        rand_dotp_avg = rand_dotp_sum/100 # The average dot product between the random vectors. 
+        
+        dotp_tot = np.dot(BB1_tot_vec,BB2_tot_vec) #Normal dotp between tot activity vectors.
+        
+        dotp_ratio = (dotp_tot - rand_dotp_avg)/(dotp_tot + rand_dotp_avg) # Ratio of the real dotp to the average of a randomly
+        # shuffled dotp. Adjusted to be (A-B)/(A+B) to exaggerate differences between dotp_tot and rand_dotp_avg.
+        
+        #ALL_scalars_LE = np.append(ALL_scalars_LE, [scalars_LE] ,axis=0) # Adds the data from this phase to the full array.
+        ALL_dotp_tot = np.append(ALL_dotp_tot, [[dotp_tot]] ,axis=0)
+        ALL_dotp_ratio = np.append(ALL_dotp_ratio, [[dotp_ratio]], axis=0) 
+        ALL_rand_dotp_avg = np.append(ALL_rand_dotp_avg, [[rand_dotp_avg]],axis=0)
+        
+    #Now to plot the frac LE firing data:
+    #ALL_scalars_flat = ALL_scalars_LE.flatten() #This makes it easier to plot.
+        
+#     fig1, ax1 = plt.subplots(1,figsize=(15,5))
+#     ax1.bar(locations_b,ALL_scalars_flat,align='edge',color='grey') #Using the same x-axis locations as the LE group activity bar plot.
+#     ax1.set_xticks(locations_b) #This places the x-axis labels in the center of each bar group.
+#     ax1.set_xticklabels(['Pre BB1','Pre BB2','NREM BB1','NREM BB2','REM BB1','REM BB2','Post BB1','Post BB2']);
+#     ax1.set_title('LE Activity inside Theta Bursts')
+#     ax1.set_ylabel('(Firing in Theta) / (Total Firing)')
+#     ax1.set_ylim(0,1)
+    
+#     fig1.savefig(param.directory+'Fraction LE Activity.pdf',format='pdf')
+    
+    # And to plot the dotp data:
+    
+#     fig2, ax1 = plt.subplots(1,figsize=(15,5))
+#     ax1.bar(locations_phase,ALL_dotp_flat,align='center',color='black',width=0.1) #Using the same x-axis locations as the LE group activity bar plot.
+#     ax1.set_xticks(locations_phase) #This places the x-axis labels in the center of each bar group.
+#     ax1.set_xticklabels(['Pre-Leanring','NREM','REM','Post-Leanring']);
+#     ax1.set_title('Orthogonality of LE Activity Between Backbones')
+#     ax1.set_ylabel('Dot Product of LE Activity Vectors')
+#     ax1.set_ylim(0,1)
+    
+#     fig2.savefig(param.directory+'LE Activity Dotp.pdf',format='pdf')
+    
+    
+    # For the ratio dotp data:
+    ALL_dotp_flat = ALL_dotp_tot.flatten()
+    locations_phase = np.arange(4)
+    ALL_dotp_ratio_flat = ALL_dotp_ratio.flatten()
+    ALL_rand_dotp_avg_flat = ALL_rand_dotp_avg.flatten()
+    locations_phase = np.arange(0,16,5)
+    #print(ALL_dotp_ratio)
+    
+    fig3, ax1 = plt.subplots(1,figsize=(15,5))
+    ax1.bar(locations_phase,ALL_dotp_flat,align='center',color='black',width=0.5,label='Dotp')
+    ax1.bar(locations_phase+1,ALL_rand_dotp_avg_flat,align='center',color='orange',width=0.5,label='Rand Avg')
+    ax1.bar(locations_phase+2,ALL_dotp_ratio_flat,align='center',color='red',width=0.5,label='(A-B)/(A+B)') #Using the same x-axis locations as the LE group activity bar plot.
+    ax1.axhline(linestyle = '--', color='blue')
+    ax1.set_xticks(locations_phase+1) #This places the x-axis labels in the center of each bar group.
+    ax1.set_xticklabels(['Pre-Leanring','NREM','REM','Post-Leanring']);
+    ax1.set_title('Orthogonality of LE Activity Between Backbones')
+    ax1.set_ylabel('...')
+    ax1.legend()
+    
+    fig3.savefig(param.directory+'LE Activity Dotp Ratio.pdf',format='pdf')
+    fig3.savefig(param.directory+'LE Activity Dotp Ratio.png',format='png')
+    
+    
+    # ----------------------------------------------
+    # LE Group Connection Strengths
+    
+    # I need to reshape the phase_periods array so that it is a 2D array with simply each BB's activity during each phase.
+    # This way, the for loop below can simply run through indexing with no problems.
+    BB_phases = np.reshape(phase_periods,(-1,2))
+    
+    # For connection weight plots I do not need two calculations for testing phases, so I delete one of them here.
+    BB_phases = np.delete(BB_phases,[0,-1],axis=0) # deletes first and last elements.
+    
+    BBs_to_bg = np.zeros((len(BB_phases),2,2)) # Holds connections from BBs to blue and green for each phase. This requires 4 numbers per
+    # phase, and looks like: [ [end phase 1 [BB1 to blue,BB1 to green],[BB2 to blue,BB2 to green] ], ...phase2 ].
+    quad_to_b = np.zeros((len(BB_phases),4)) # Holds connections strengths from each individual quad group to blue.
+    # [ [b to b, g to b, pu to b, pi to b], ... ]
+    quad_to_g = np.zeros((len(BB_phases),4)) # Same, but to green. [ [b to g, g to g, pu to g, pi to g], ... ]
+    
+    #It will be easier to seperate LE neurons into groups:
+    LE_quad_neurons = [[],[],[],[]] #For holding LE neurons by quad group.
+    for LE_nrn in LE_neurons: 
+        if LE_nrn.quad_color == 'blue':
+            LE_quad_neurons[0].append(LE_nrn)
+        if LE_nrn.quad_color == 'green':
+            LE_quad_neurons[1].append(LE_nrn)
+        if LE_nrn.quad_color == 'purple':
+            LE_quad_neurons[2].append(LE_nrn)
+        if LE_nrn.quad_color == 'pink':
+            LE_quad_neurons[3].append(LE_nrn)
+            
+    #Using the BB_phases list from above:
+    for index_phase,(start_phase,end_phase) in enumerate(BB_phases):
+        
+        try:
+            index = [time for cws,time in neurons[0].cw_in_history].index(end_phase) #Gets index of cw_in_history at time when 
+            # the phase ends.
+        except ValueError: #This covers the case where we try and index the param.simLength. Simulation of course only runs
+            # to param.simLength-1, so we just tell it to grab that value instead.
+            index = [time for cws,time in neurons[0].cw_in_history].index(end_phase-1)
+            
+        for b_nrn in LE_quad_neurons[0]: #Loops through blue quad neurons.
+            endofphase_connweights = b_nrn.cw_in_history[index][0] #Connection weights at just this point in time.
+            
+            for presyn_ID, w_conn in enumerate(endofphase_connweights): #Loops through all incoming connection weights.
+                    if neurons[presyn_ID].connections[b_nrn.ID][1] == 1: #If the connection exists. 
+                            
+                        if neurons[presyn_ID].backbone_ID == 1 or neurons[presyn_ID].backbone_ID == 2: # If the presynaptic 
+                            # neuron is a backbone neuron.
+                            BBs_to_bg[index_phase,(neurons[presyn_ID].backbone_ID-1),0] += w_conn
+                            
+                        if neurons[presyn_ID].quad_color == 'blue': #For blue to blue connections.
+                            quad_to_b[index_phase,0] += w_conn 
+                        if neurons[presyn_ID].quad_color == 'green': #For green to blue connections.
+                            quad_to_b[index_phase,1] += w_conn 
+                        if neurons[presyn_ID].quad_color == 'purple': #For purple to blue connections.
+                            quad_to_b[index_phase,2] += w_conn 
+                        if neurons[presyn_ID].quad_color == 'pink': #For pink to blue connections.
+                            quad_to_b[index_phase,3] += w_conn 
+            
+            
+        for g_nrn in LE_quad_neurons[1]: #Loops through green quad neurons.
+            endofphase_connweights = g_nrn.cw_in_history[index][0] #Connection weights at just this point in time.
+            
+            for presyn_ID, w_conn in enumerate(endofphase_connweights): #Loops through all incoming connection weights.
+                    if neurons[presyn_ID].connections[g_nrn.ID][1] == 1: #If the connection exists. 
+                            
+                        if neurons[presyn_ID].backbone_ID == 1 or neurons[presyn_ID].backbone_ID == 2: # If the presynaptic 
+                            # neuron is a backbone neuron.
+                            BBs_to_bg[index_phase,(neurons[presyn_ID].backbone_ID-1),1] += w_conn
+                            
+                        if neurons[presyn_ID].quad_color == 'blue': #For blue to green connections.
+                            quad_to_g[index_phase,0] += w_conn 
+                        if neurons[presyn_ID].quad_color == 'green': #For green to green connections.
+                            quad_to_g[index_phase,1] += w_conn 
+                        if neurons[presyn_ID].quad_color == 'purple': #For purple to green connections.
+                            quad_to_g[index_phase,2] += w_conn 
+                        if neurons[presyn_ID].quad_color == 'pink': #For pink to green connections.
+                            quad_to_g[index_phase,3] += w_conn 
+            
+    
+    
+    #Normalizing:
+    BBs_to_bg[:,:,0] = BBs_to_bg[:,:,0]/len(LE_quad_neurons[0])
+    BBs_to_bg[:,:,1] = BBs_to_bg[:,:,1]/len(LE_quad_neurons[1])
+    
+    # Calculating a ratio (A-B)/(A+B) between BB1 to blue and BB1 to green, and similarly for BB2.
+    BBs_ratios = np.zeros((len(BB_phases),2)) # To hold ratio values for each BB.
+    
+    # It isn't important which value is A and which is B, so long as the absolute value of the numorator is taken.
+    BBs_ratios[:,0] = abs(BBs_to_bg[:,0,0] - BBs_to_bg[:,0,1])/abs(BBs_to_bg[:,0,0] + BBs_to_bg[:,0,1]) # BB1
+    BBs_ratios[:,1] = abs(BBs_to_bg[:,1,0] - BBs_to_bg[:,1,1])/abs(BBs_to_bg[:,1,0] + BBs_to_bg[:,1,1]) # BB2
+        
+    locations = np.array([0,8,13,21,26,34])
+    
+    fig4, (ax1,ax2) = plt.subplots(2,figsize=(15,10))
+    ax1.bar(locations,BBs_to_bg[:,0,0],align='edge',color='blue',label='BB1 to b')
+    ax1.bar(locations+1,BBs_to_bg[:,0,1],align='edge',color='green',edgecolor='blue',linewidth=2,label='BB1 to g')
+    ax1.bar(locations+2,BBs_to_bg[:,1,1],align='edge',color='green',label='BB2 to g')
+    ax1.bar(locations+3,BBs_to_bg[:,1,0],align='edge',color='blue',edgecolor='green',linewidth=2,label='BB2 to b')
+    ax1.set_xticks(locations+2) #This places the x-axis labels in the center of each bar group.
+    ax1.set_xticklabels(['Pre','NREM First Half','NREM Second Half','REM First Half','REM Second Half','Post']);
+    ax1.set_title('Connection Strength from BB to Quad Groups')
+    ax1.set_ylabel('Avg CW per Neuron')
+    #ax1.set_ylim(0,20)
+    ax1.legend()
+    
+    ax2.bar(locations,BBs_ratios[:,0],align='edge',color='blue',edgecolor='red',linewidth=2,label='BB1 (A-B)/(A+B)')
+    ax2.bar(locations+1,BBs_ratios[:,1],align='edge',color='green',edgecolor='red',linewidth=2,label='BB2 (A-B)/(A+B)')
+    ax2.set_xticks(locations+1) #This places the x-axis labels in the center of each bar group.
+    ax2.set_xticklabels(['Pre','NREM First Half','NREM Second Half','REM First Half','REM Second Half','Post']);
+    ax2.set_ylabel('Ratio Between BB to blue and green')
+    ax2.legend()
+    
+    fig4.savefig(param.directory+'CW BBs to bg.pdf',format='pdf')
+    fig4.savefig(param.directory+'CW BBs to bg.png',format='png')
+    
+    #Normalizing the connection strengths by number of neurons in group:
+#    quad_to_b = quad_to_b/len(LE_quad_neurons[0])
+#    quad_to_g = quad_to_g/len(LE_quad_neurons[1])
+    
+#    bar_locations = np.array([0,12,24,36,48,60,72,84])
+    
+#     fig5, ax1 = plt.subplots(1,figsize=(15,5))
+#     ax1.bar(bar_locations,quad_to_b[:,0],align='edge',color='blue',edgecolor='blue',linewidth=3,label='b to b')
+#     ax1.bar(bar_locations+1,quad_to_b[:,1],align='edge',color='blue',edgecolor='green',linewidth=3,label='g to b')
+#     ax1.bar(bar_locations+2,quad_to_b[:,2],align='edge',color='blue',edgecolor='purple',linewidth=3,label='pu to b')
+#     ax1.bar(bar_locations+3,quad_to_b[:,3],align='edge',color='blue',edgecolor='pink',linewidth=3,label='pi to b')
+    
+#     ax1.bar(bar_locations+5,quad_to_g[:,0],align='edge',color='green',edgecolor='blue',linewidth=3,label='b to g')
+#     ax1.bar(bar_locations+6,quad_to_g[:,1],align='edge',color='green',edgecolor='green',linewidth=3,label='g to g')
+#     ax1.bar(bar_locations+7,quad_to_g[:,2],align='edge',color='green',edgecolor='purple',linewidth=3,label='pu to g')
+#     ax1.bar(bar_locations+8,quad_to_g[:,3],align='edge',color='green',edgecolor='pink',linewidth=3,label='pi to g')
+    
+#     ax1.set_xticks(bar_locations+4) #This places the x-axis labels in the center of each bar group.
+#     ax1.set_xticklabels(['Pre BB1','Pre BB2','NREM BB1','NREM BB2','REM BB1','REM BB2','Post BB1','Post BB2']);
+#     ax1.set_title('Connection Strengths to Blue and Green LE Groups')
+#     ax1.set_ylabel('Avg CW per Neuron')
+#     ax1.set_ylim(0,3)
+#     ax1.legend()
+    
+#     fig5.savefig(param.directory+'Quad to bg.pdf',format='pdf')
+#     fig5.savefig(param.directory+'Quad to bg.png',format='png')
+    
+    
+    
+def plot_hist(time1,time2): #plots histogram of dotp data between LE scatter points. Time1 and Time2 will usually indicate the 
+    # pre and post-learning times respectively.
+    # Modified 5-2-22 to request pre-normalized vectors from BBs_scatter() and to not normalize after taking the dot product below.
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+    #Below BBs_scatter() is called to return the connection strength values from bb1 and bb2 for LE neurons. 
+    bb1_vals_pre,bb2_vals_pre = BBs_scatter([time1,time1],True)
+    bb1_vals_post,bb2_vals_post = BBs_scatter([time2,time2],True)
+
+    mag_min = 0 # The minimum magnitude a vector can have if it is to be added to the large_scatter_points array.
+    unnorm_scatter_points, unnorm_bg_scatter_points = [],[]
+#    scatter_points,large_scatter_points,bg_scatter_points = [],[],[] #To hold pre and post learning scatter points.
+    # pre-learning scatter points to be stored at index 0, post at index 1.
+    
+    
+#     for bb1_vals_,bb2_vals_ in [[bb1_vals_pre,bb2_vals_pre],[bb1_vals_post,bb2_vals_post]]: #Loops through first the pre-learning
+#         # values and then the post-learning values.
+#         # 2D list of all cw points vectors, normalized to mag 1.
+#         scatter_points_temp = [np.array([bb1_val,bb2_val])/(np.sqrt(np.array([bb1_val,bb2_val]).dot(np.array([bb1_val,bb2_val])))) \
+#                           for bb1_val,bb2_val in zip(bb1_vals_,bb2_vals_)]
+#         #2D list of cw points vectors, normalized to mag 1, and only including points whose magnitude was above 3 before normalization.
+#         large_scatter_points_temp = [np.array([bb1_val,bb2_val])/(np.sqrt(np.array([bb1_val,bb2_val]).dot(np.array([bb1_val,bb2_val])))) \
+#                           for bb1_val,bb2_val in zip(bb1_vals_,bb2_vals_) if \
+#                                 np.sqrt(np.array([bb1_val,bb2_val]).dot(np.array([bb1_val,bb2_val]))) > mag_min] 
+#         # 2D list of cw points of green and blue LE neurons.      
+#         bg_scatter_points_temp = [np.array([bb1_val,bb2_val])/(np.sqrt(np.array([bb1_val,bb2_val]).dot(np.array([bb1_val,bb2_val])))) \
+#                           for index,(bb1_val,bb2_val) in enumerate(zip(bb1_vals_,bb2_vals_)) if \
+#                              LE_neurons[index].quad_color == 'blue' or \
+#                             LE_neurons[index].quad_color == 'green'] 
+        
+#         scatter_points.append(scatter_points_temp) 
+#         large_scatter_points.append(large_scatter_points_temp)
+#         bg_scatter_points.append(bg_scatter_points_temp)
+        
+    
+    for bb1_vals_,bb2_vals_ in [[bb1_vals_pre,bb2_vals_pre],[bb1_vals_post,bb2_vals_post]]: #Loops through first the pre-learning
+        # values and then the post-learning values.
+        
+        scatter_points_temp = [np.array(bb1_val,bb2_val) for bb1_val,bb2_val in zip(bb1_vals_,bb2_vals_)] # Makes list holding
+        # cw point vectors.
+        bg_scatter_points_temp = [np.array([bb1_val,bb2_val]) for index,(bb1_val,bb2_val) in enumerate(zip(bb1_vals_,bb2_vals_)) if \
+                                  LE_neurons[index].quad_color == 'blue' or LE_neurons[index].quad_color == 'green']
+        
+        unnorm_scatter_points.append(scatter_points_temp)
+        unnorm_bg_scatter_points.append(bg_scatter_points_temp)
+        
+    
+    
+    bg_points_colors = [nrn_LE.quad_color for nrn_LE in LE_neurons if nrn_LE.quad_color == 'blue' or \
+                        nrn_LE.quad_color == 'green'] #Grabs colors of all LE neurons to match with bg_scatter_points.
+    
+    # For the following lists, index 0 will hold pre-learning and index 1 post learning.
+    dotp_values = [] #List to hold all the dot product values between cw points.
+    large_dotp_values = [] #List to hold all the dot product values between cw points with mag above mag_min.
+    bbgg_dotp_values = [] #List to hold all the dot product values for b-b and g-g point pairs. 
+    bggb_dotp_values = [] # Holds all dot product values for b-g and g-b point pairs.
+
+    
+    for i in range(2): #loops over pre and post learning scatter points.
+        
+        dotp_values_temp = []
+        
+        for index_1,cw_point_1 in enumerate(unnorm_scatter_points[i]): #Loops through all the points.
+            for index_2,cw_point_2 in enumerate(unnorm_scatter_points[i]): #Loops through all points again.
+
+                if index_1 != index_2: #Avoids taking the dot product between the same point.
+                    temp_dotp = np.dot(cw_point_1,cw_point_2)
+                    dotp_values_temp.append(temp_dotp)
+                    
+        dotp_values.append(dotp_values_temp)
+         
+        
+#         large_dotp_values_temp = []
+
+#         for index_1,cw_point_1 in enumerate(large_scatter_points[i]): #Loops through all the points.
+#             for index_2,cw_point_2 in enumerate(large_scatter_points[i]): #Loops through all points again.
+
+#                 if index_1 != index_2: #Avoids taking the dot product between the same point.
+#                     temp_dotp = np.dot(cw_point_1,cw_point_2)
+#                     large_dotp_values_temp.append(temp_dotp)
+                    
+#         large_dotp_values.append(large_dotp_values_temp)
+                    
+                    
+        bbgg_dotp_values_temp = []
+        bggb_dotp_values_temp = []
+        
+        for index_1,cw_point_1 in enumerate(unnorm_bg_scatter_points[i]): #Loops through all the points.
+            for index_2,cw_point_2 in enumerate(unnorm_bg_scatter_points[i]): #Loops through all points again.
+
+                if index_1 != index_2: #Avoids taking the dot product between the same point
+                    if bg_points_colors[index_1] == bg_points_colors[index_2]: # b-b and g-g dot products.
+                        temp_dotp = np.dot(cw_point_1,cw_point_2)
+                        bbgg_dotp_values_temp.append(temp_dotp)
+                    if bg_points_colors[index_1] != bg_points_colors[index_2]: # b-g and g-b dot products.
+                        temp_dotp = np.dot(cw_point_1,cw_point_2)
+                        bggb_dotp_values_temp.append(temp_dotp)
+        
+        bbgg_dotp_values.append(bbgg_dotp_values_temp)
+        bggb_dotp_values.append(bggb_dotp_values_temp)
+
+    
+    #Plot the histogram:
+#     fig2, (ax1,ax2) = plt.subplots(1,2,figsize=(16,8))
+    
+#     ax1.hist(dotp_values,bins=100)
+#     ax1.set_title('Dot Products Between CW Scatter Points at {0}ms'.format(time_bb1))
+#     ax1.set_ylabel('Number of Occurances')
+#     ax1.set_xlabel('Dot Product Value')
+    
+#     ax2.hist(large_dotp_values,bins=100,facecolor='orange')
+#     ax2.set_title('Dot Products Between CW Scatter Points at {0}ms, Mag > {1}'.format(time_bb1,mag_min))
+#     ax2.set_ylabel('Number of Occurances')
+#     ax2.set_xlabel('Dot Product Value')
+    
+#     fig2.savefig(param.directory+'CW Histograms Time={0}.pdf'.format(time_bb1),format='pdf')
+    
+    # Combines both data into one set and uses that to get the bin edges for use in plotting.
+    bbgg_bins = np.histogram(np.hstack((bbgg_dotp_values[0],bbgg_dotp_values[1])), bins=40)[1]
+    bggb_bins = np.histogram(np.hstack((bggb_dotp_values[0],bggb_dotp_values[1])), bins=40)[1]
+    
+    fig3, (ax1,ax2) = plt.subplots(1,2,figsize=(16,8))
+    
+    ax1.hist(bbgg_dotp_values[0],bins=bbgg_bins,facecolor='orange',alpha=1,label='before learning')
+    ax1.hist(bbgg_dotp_values[1],bins=bbgg_bins,facecolor='red',alpha=0.5,label='after learning')
+    ax1.set_title('B-B, G-G CW Scatter Points at {0} and {1}ms'.format(time1,time2))
+    ax1.set_ylabel('Number of Occurances')
+    ax1.set_xlabel('Dot Product Value')
+    ax1.set_xlim(0,1)
+    ax1.legend()
+
+    ax2.hist(bggb_dotp_values[0],bins=bggb_bins,facecolor='pink',alpha=1,label='before learning')
+    ax2.hist(bggb_dotp_values[1],bins=bggb_bins,facecolor='purple',alpha=0.5,label='after learning')
+    ax2.set_title('B-G, G-B CW Scatter Points at {0} and {1}ms'.format(time1,time2))
+    ax2.set_ylabel('Number of Occurances')
+    ax2.set_xlabel('Dot Product Value')
+    ax2.set_xlim(0,1)
+    ax2.legend()
+    
+    fig3.savefig(param.directory+'BG CW Histograms Pre&Post Learning.pdf'.format(time1,time2),format='pdf')
+    fig3.savefig(param.directory+'BG CW Histograms Pre&Post Learning.png'.format(time1,time2),format='png')
+       
+        
+        
+
+def export_LE_spikes(): # Separates LE spikes into each phase and writes them to 
+    # txt file.
+
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    LE_neurons.sort(key=sort_LE_bycolor)
+
+    all_spikes = [[] for i in range(len(LE_neurons))] # List for holding all spikes accross entire simulation
+    pretest_BB1_spikes = [[] for i in range(len(LE_neurons))] # Pre-learning during BB1 activity
+    pretest_BB2_spikes = [[] for i in range(len(LE_neurons))] # Pre-learning during BB2 activity
+    NREM_spikes = [[] for i in range(len(LE_neurons))] # Holds spikes that occur in first phase of learning (usually NREM)
+    NREMtest_BB1_spikes = [[] for i in range(len(LE_neurons))] # Post-NREM during BB1 activity
+    NREMtest_BB2_spikes = [[] for i in range(len(LE_neurons))] # Post-NREM during BB1 activity
+    REM_spikes = [[] for i in range(len(LE_neurons))] # Second phase
+    posttest_BB1_spikes = [[] for i in range(len(LE_neurons))] # post-learning during BB1 activity
+    posttest_BB2_spikes = [[] for i in range(len(LE_neurons))] # post-learning during BB2 activity
+
+    
+    for i,LE_nrn in enumerate(LE_neurons):
+        
+        if len(LE_nrn.spikeTimes) > 0: # So long as the neuron actually spikes
+            
+            for spike_t in LE_nrn.spikeTimes*param.stepSize: # NOTE nrn.spikeTimes gives times in ms/param.stepSize, so we have to get back
+                # to ms. spike_t is now in ms.
+                all_spikes[i].append(spike_t)
+                
+                if param.plas_skip_time+20 < spike_t < param.BB_len_test: # For BB1 spikes in pre-learning. Skips strange synchronous burst
+                    # that appears at start of every simulation.
+                    pretest_BB1_spikes[i].append(spike_t)
+                
+                if param.BB_len_test < spike_t < param.t_start_NREM: # For BB2 spikes in pre-learning
+                    pretest_BB2_spikes[i].append(spike_t)
+                    
+                if param.t_start_NREM < spike_t < param.t_start_NREMtest: # For spikes in first phase (NREM)
+                    NREM_spikes[i].append(spike_t)
+                    
+                if param.t_start_NREMtest < spike_t < param.t_start_NREMtest+param.BB_len_test: # For BB1 spikes in post-NREM test
+                    NREMtest_BB1_spikes[i].append(spike_t)
+                
+                if param.t_start_NREMtest+param.BB_len_test < spike_t < param.t_start_REM: # For BB2 spikes in post-NREM test
+                    NREMtest_BB2_spikes[i].append(spike_t)
+            
+                if param.t_start_REM < spike_t < param.t_start_posttest: # For spikes in second phase (REM)
+                    REM_spikes[i].append(spike_t)
+                    
+                if param.t_start_posttest < spike_t < param.t_start_posttest+param.BB_len_test: # For BB1 spikes in post-learning
+                    posttest_BB1_spikes[i].append(spike_t)
+                
+                if param.t_start_posttest+param.BB_len_test < spike_t: # For BB2 spikes in post-learning
+                    posttest_BB2_spikes[i].append(spike_t)
+            
+
+    # NOTE that opening a file in the write mode (using "w") automatically clears the file when it is opened, so I am always 
+    # writing onto an empty file.
+    with open(param.directory+"all_spikes.txt", "w") as output:
+        output.write(str(all_spikes))
+    with open(param.directory+"pretest_BB1_spikes.txt", "w") as output:
+        output.write(str(pretest_BB1_spikes))
+    with open(param.directory+"pretest_BB2_spikes.txt", "w") as output:
+        output.write(str(pretest_BB2_spikes))
+    with open(param.directory+"NREM_spikes.txt", "w") as output:
+        output.write(str(NREM_spikes))
+    with open(param.directory+"NREMtest_BB1_spikes.txt", "w") as output:
+        output.write(str(NREMtest_BB1_spikes))
+    with open(param.directory+"NREMtest_BB2_spikes.txt", "w") as output:
+        output.write(str(NREMtest_BB2_spikes))
+    with open(param.directory+"REM_spikes.txt", "w") as output:
+        output.write(str(REM_spikes))
+    with open(param.directory+"posttest_BB1_spikes.txt", "w") as output:
+        output.write(str(posttest_BB1_spikes))
+    with open(param.directory+"posttest_BB2_spikes.txt", "w") as output:
+        output.write(str(posttest_BB2_spikes))
+    
+    with open(param.directory+"parameters.txt", "w") as output: # Writes simulation parameters to a txt file.
+        param_dict = vars(param)
+        for (key,val) in param_dict.items():
+            output.write(str(key)+': '+str(val)+'\n')
+
+
+        
+        
+def assign_LE_Idrive(quad_colors): # Assigns new Idrives to LE neurons. quad_colors contains str of all
+    # colors to change the Idrive for.
+    global neuron
+    
+    for nrn in neurons:
+        if nrn.backbone_ID == 0 and nrn.quad_color in quad_colors:
+            nrn.Idrive = param.Idrive_LE # Assigns new Idrive.  
+            
+            
+            
+def Idrive_scatter(RR_times, norm_boo): # Function to calculate and plot the cw scatter plot with x-axis cw from BB1, y-axis cw
+    # from BB2, and each point representing an LE neuron. However, the color scheme will be a continuous colorbar based on the LE neuron's
+    # Idrive. RR_times = [Time to grab info from BB1, BB2]. 
+    
+    time_bb1 = RR_times[0] #Selects bb1 calc time.
+    time_bb2 = RR_times[1] #bb2 calculation time.
+    
+
+    if time_bb1 != time_bb2: # If the two times provided are not equal.
+        print('Times Provided to Idrive_scatter were not equal. This will cause incorrect figure labelling and distort plots.')
+
+    
+    recorded_times = [i[1] for i in neurons[0].cw_in_history] #Recorded plasticity times are the same for all neurons.
+    
+    LE_neurons = []
+    for nrn in neurons:
+        if nrn.backbone_ID == 0:
+            LE_neurons.append(nrn)
+    
+
+    bb1_REM_vals,bb2_REM_vals = np.zeros(len(LE_neurons)),np.zeros(len(LE_neurons)) #Arrays of cw sums for plotting on scatter plot.
+
+    for nrn_LE in LE_neurons:
+        cw_vec_bb1 = nrn_LE.cw_in_history[recorded_times.index(time_bb1)][0] #Vector of cw inputs to nrn at time time_NREM.
+        cw_vec_bb2 = nrn_LE.cw_in_history[recorded_times.index(time_bb2)][0] #Similar, at time time_REM.
+
+        #Now I need to sort through these vectors and find connections comming from backbone 1. 
+        for index,cw in enumerate(cw_vec_bb1): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == 1 and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                bb1_REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+
+        for index,cw in enumerate(cw_vec_bb2): # cw is connection weight value (between 0 and param.w_max)
+            if neurons[index].backbone_ID == 2 and neurons[index].connections[nrn_LE.ID][1] == 1: # If the presyn neuron is from correct backbone and the connections exists.
+                bb2_REM_vals[LE_neurons.index(nrn_LE)] += cw #conn weight is summed to that neuron. 
+              
+    
+    if norm_boo == True:
+        # We also want to normalize all values so we can easily compare before and after learning. Do this by dividing all points
+        # by largest value in x and y directions:
+        max_val_bb1,max_val_bb2 = max(bb1_REM_vals),max(bb2_REM_vals)
+        bb1_REM_vals, bb2_REM_vals = bb1_REM_vals/max_val_bb1, bb2_REM_vals/max_val_bb2 #New lists of normalized values.
+    
+            
+    
+    # Graph:
+    
+    #Creates custom cmap:
+#     colors_array = np.array(['orangered','magenta','cyan'])
+#     # bounds array here places the 3 colors at and directly between the max and min Idrives.
+#     bounds_array = np.array([param.Idrive_LE,param.Idrive_LE+(param.Idrive_LE-param.Idrive_LE)/2,param.Idrive_LE])
+#     norm = plt.Normalize(min(bounds_array),max(bounds_array))
+#     tuples = list(zip(map(norm,bounds_array),colors_array))
+#     cmap = colors.LinearSegmentedColormap.from_list("my cmap",tuples)
+    cmap = plt.cm.get_cmap('plasma')
+    
+    fig, ax1 = plt.subplots(1,figsize=(10,8))
+    sp = ax1.scatter(bb1_REM_vals,bb2_REM_vals, c=[LE_nrn.Idrive for LE_nrn in LE_neurons], cmap=cmap)#, vmin=param.Idrive_LE, vmax=param.Idrive_LE)
+
+    
+    if norm_boo == True:
+        plot_text = 'Normalized'
+        ax1.set_xlim([0,1.05])
+        ax1.set_ylim([0,1.05])
+    else:
+        plot_text = 'Unnormalized'
+    
+    for index,LE_nrn in enumerate(LE_neurons): #Annotes scatter plot points with nrn ID.
+        ax1.annotate(LE_nrn.ID,(bb1_REM_vals[index],bb2_REM_vals[index]))
+    
+    cbar = fig.colorbar(sp)
+    cbar.set_label('LE Neuron Idrive')
+    ax1.set_title('Idrive Scatter at {0}ms {1}'.format(time_bb1,plot_text),size=15)
+    ax1.set_xlabel('Sum of CW for bb1 at ({0}ms)'.format(time_bb1))
+    ax1.set_ylabel('Sum of CW for bb2 at ({0}ms)'.format(time_bb2))
+    fig.savefig(param.directory+'Idrive Scatter at Time={0} {1}.pdf'.format(time_bb1, plot_text),format='pdf')
+    fig.savefig(param.directory+'Idrive Scatter at Time={0} {1}.png'.format(time_bb1, plot_text),format='png')
+
+
+    
+    
+    
+def plot_BBtoLE_plas(): # Function to plot plasticity vs time for each backbone, showing its connection strength to each LE 
+    # group.
+    LE_groups = ['blue', 'green', 'purple', 'pink'] # There are four LE groups, blue, green, purple, and pink.
+    
+    avg_plas_array = np.zeros((len(param.bbs_toplot), len(LE_groups), np.shape(neurons[0].cw_in_history)[0])) # This list will hold all
+    # the data for plotting. Along the first axis is the number of BBs, second axis the number of BB-LE groups to plot, and 
+    # third axis the length of time for which to plot them. All neurons should have the same cw_in_history length.
+    
+    counts = np.zeros((len(param.bbs_toplot),len(LE_groups))) # Array to hold counts for number of connections falling into each category
+    # so that the average value can be found later.
+    
+    for nrn in neurons:
+
+        if nrn.category == 'Excitatory' and nrn.backbone_ID in param.bbs_toplot: # For BB neurons as presynaptic.
+
+            for postsyn_ID, conn in nrn.connections: # Loops through outgoing connections.
+
+                if neurons[int(postsyn_ID)].category == 'Excitatory' and conn == 1 and \
+                neurons[int(postsyn_ID)].backbone_ID == 0: # For BB->LE connections.
+
+                    LE_i = LE_groups.index(neurons[int(postsyn_ID)].quad_color) # Grabs index of LE neuron quad color
+                    # based on LE_groups.
+                    
+                    cw_in_hist = neurons[int(postsyn_ID)].cw_in_history
+
+                    mat_in_only = [] # 2D matrix to hold only the connection weights, not including the times,
+                    for (weights_mat, time) in cw_in_hist:
+                        mat_in_only.append(weights_mat)
+                        
+                    mat_in_array = np.array(mat_in_only) # Needs to be an array (2D) so we can index through dimensions.
+                    cw_in = mat_in_array[:,int(nrn.ID)] # Extracts conn weights over time to correct postsyn 
+                        # neuron. Thus postsyn_cws is a 1D list containing cw for this BB->LE conn for all times of active plas.
+                    
+                    avg_plas_array[nrn.backbone_ID-1, LE_i] += cw_in # Adds cw from BB to LE neuron time series.
+                    counts[nrn.backbone_ID-1,LE_i] += 1
+    
+    
+    
+    for BB_i, BB_data in enumerate(avg_plas_array):
+        for LE_i, LE_data in enumerate(BB_data):
+            
+            avg_plas_array[BB_i, LE_i] = avg_plas_array[BB_i, LE_i]/counts[BB_i, LE_i] # Averages over total number of conns.
+        
+    
+    
+    time_list = []        
+    for (weights,time) in neurons[0].cw_in_history: # to grab the times of cw storage from the first neuron.
+        time_list.append(time)
+        
+    # Plots plasticity conn weights vs time for each group:
+    colors = ['blue', 'green', 'purple', 'pink']
+    
+    fig, (ax1,ax2) = plt.subplots(2,figsize=(16,16))
+    
+    for BB_index, BB_ID in enumerate(param.bbs_toplot): 
+        
+        for i, cw_data in enumerate(avg_plas_array[BB_index]):
+            
+            if BB_ID == 1:
+                ax1.plot(time_list, cw_data, color=colors[i])
+                
+            if BB_ID == 2:
+                ax2.plot(time_list, cw_data, color=colors[i])
+    
+    ax1.set_title('Connection Strength from BBs to LE Groups', size=20)
+    ax1.set_ylabel('Avg Conn Weight Strength per Synapse - BB1', size=15)
+    ax2.set_ylabel('Avg Conn Weight Strength per Synapse - BB2', size=15)
+    ax2.set_xlabel('Time (ms)', size=15)
+    ax1.set_ylim([0,param.w_max])
+    ax2.set_ylim([0,param.w_max])
+    
+    fig.savefig(param.directory+'BB to LE Conn Strength vs Time.pdf',format='pdf')
+    fig.savefig(param.directory+'BB to LE Conn Strength vs Time.png',format='png')
+
+
+
+----------------------------------------------------------
+
+
+
+param = init_param() # Initializes parameters
+neurons,nc_Matrix = init_nrn() #initializes neurons and creates universal list.
+strengthen_backbone()
+init_quad_colors() # Groups LE neurons based on intial connectivities to bbs.
+assign_LE_Idrive(['purple','pink'])
+strengthen_LE() #Must come after init_quad_colors().
+
+def mainProgramLoop():
+    
+    for t_ind in tqdm(range(param.Ntimes)):
+        
+        #Records timing of spikes (in t/stepSize)
+        updateSpikeTime(t_ind)
+        #Updates the input synaptic current to be used in RK4
+        updateSyn(t_ind)
+        #A function to update the solutions for all neurons' D.E.s
+        RK4(t_ind)
+
+        vary_param(t_ind) #Checks t_ind to change network gks values. Also added backbone switching and plasticity.
+        
+        zeroTempVars() #Resets temporary variables like Isyn
+        
+    export_LE_spikes() # Exports spike data to .txt files
+    
+    return 
+
+mainProgramLoop()
+
+
+---------------------------------------------------------
+
+
+def all_plots(): # Holds all functions for plotting
+    
+    record_gaussian() #Records spike times as gaussian curves.
+    #frequency_Theta()
+    plot_raster(0,nc_Matrix) # Plots raster plot
+    plot_bb_mat(True) # Plots plasticity and conn matrix
+    plot_plasvstime() # Plots plasticity vs time graphs for each BB.
+    plot_BBtoLE_plas() # Plots plasticity vs time from each BB to each LE group.
+
+#     CW_scatter(param.t_start_NREM,param.t_start_REM,param.t_start_posttest,1)
+#     CW_scatter(param.t_start_NREM,param.t_start_REM,param.t_start_posttest,2)
+    
+#     BBs_scatter([param.t_start_NREMtest,param.t_start_NREMtest], True) # barplots() plots BBs_scatter (right now set to boo_norm=True)
+#     # for before and after learning, so I only need to call for after NREM.
+    
+#     BBs_scatter([param.plas_skip_time,param.plas_skip_time], False)
+#     BBs_scatter([param.t_start_NREMtest,param.t_start_NREMtest], False)
+#     BBs_scatter([param.t_start_posttest,param.t_start_posttest], False)
+
+#     Idrive_scatter([param.plas_skip_time,param.plas_skip_time], False)
+#     Idrive_scatter([param.t_start_NREMtest,param.t_start_NREMtest], False)
+#     Idrive_scatter([param.t_start_posttest,param.t_start_posttest], False)
+    
+#     COM_vectors(param.t_start_NREM,param.t_start_posttest,True)
+#     COM_vectors(param.t_start_NREM,param.t_start_NREMtest,True)
+#     COM_vectors(param.t_start_NREMtest,param.t_start_posttest,True)
+    
+#     COM_vectors(param.t_start_NREM,param.t_start_posttest,False)
+#     COM_vectors(param.t_start_NREM,param.t_start_NREMtest,False)
+#     COM_vectors(param.t_start_NREMtest,param.t_start_posttest,False)
+
+#     LE_connections([[param.t_start_NREM,param.t_start_NREM+param.BB_len_NREM],[param.t_start_NREM+param.BB_len_NREM,param.t_start_REM],
+#                     [param.t_start_REM,param.t_start_REM+param.BB_len_REM],[param.t_start_REM+param.BB_len_REM,param.t_start_posttest]])
+
+# #     dotp_activity([[param.plas_skip_time+50,param.BB_len_test],[BB_len_test+50,param.t_start_NREM]])
+# #     dotp_activity([[param.t_start_NREM+50,param.t_start_NREM+param.BB_len_NREM],[param.t_start_NREM+param.BB_len_NREM+50,param.t_start_REM]])
+# #     dotp_activity([[param.t_start_REM+50,param.t_start_REM+param.BB_len_REM],[param.t_start_REM+param.BB_len_REM+50,param.t_start_posttest]])
+# #     dotp_activity([[param.t_start_posttest+50,param.t_start_posttest+param.BB_len_test],[param.t_start_posttest+param.BB_len_test+50,param.simLength]])
+
+#     barplots()
+#     plot_hist(param.t_start_NREM,param.t_start_posttest)
+
+    beep() #Plays beeps as last line of code.
+    
+all_plots()
+
+
