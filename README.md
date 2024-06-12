@@ -21,3 +21,4 @@ The most up to date version of code is available under Jupyter Notebooks / New .
 
 For simulations involving two backbone "memories" in competition and only one iteration of NREM and REM, see "single_cycle_simulation.ipynb" and the subsequent plotting notebook "single_cycle_plot.ipynb". For simulations involving multiple iterations of NREM and REM, see "multiple_cycle_simulation" and "multiple_cycle_plot".
 
+Single backbone simulations can be run with "Fig2 Generate.ipynb", however this likely needs updating to work properly.
