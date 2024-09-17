@@ -22,3 +22,7 @@ The most up to date version of code is available under Jupyter Notebooks / New .
 For simulations involving two backbone "memories" in competition and only one iteration of NREM and REM, see "single_cycle_simulation.ipynb" and the subsequent plotting notebook "single_cycle_plot.ipynb". For simulations involving multiple iterations of NREM and REM, see "multiple_cycle_simulation" and "multiple_cycle_plot".
 
 Single backbone simulations can be run with "Fig2 Generate.ipynb", however this likely needs updating to work properly.
+
+------------------------------------------------------------------------------------------------
+
+There is a terminology difference between the paper and the code. "Slow firing" (SF) cells as referred to in the paper are equivalent to the "less excitable" (LE) cells in the code. Similarly, "engram backbone" (EB) cells in the paper are simply referred to as "backbone" (BB) cells in the code.
